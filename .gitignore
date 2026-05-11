@@ -1,0 +1,32 @@
+# Environment
+.env
+.venv
+
+# Logs
+logs/*.jsonl
+logs/*.log
+
+# Databases
+*.sqlite
+*.db
+
+# PDFs (user provided)
+pdfs/*.pdf
+
+# Vault (generated)
+vault/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Local pip builds
+dist/
+build/

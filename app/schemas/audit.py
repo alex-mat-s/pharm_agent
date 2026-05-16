@@ -6,7 +6,10 @@ from pydantic import BaseModel, Field
 
 
 class AuditEvent(BaseModel):
-    """Base audit event for JSONL append-only log."""
+    """Base audit event for JSONL append-only log and SQLite audit table.
+
+    Supports generic events plus rich LLM call metadata in ``metadata``.
+    """
 
     event_id: str  # UUID
     run_id: str

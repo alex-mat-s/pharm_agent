@@ -126,17 +126,14 @@ def test_cli_run_and_verify(tmp_path, _mock_obsidian):
     fake_llm = FakeLLMClient()
 
     with patch("app.cli.Orchestrator") as MockOrchestrator:
-        # Create a real orchestrator but inject our fake LLM client
+        # Use a fresh temp database so stale schema never interferes
         from app.storage.db import Database
         db_path = tmp_path / "cli_test.sqlite"
-        db = Database(db_path)
-        db.init_schema()
-        real_orch = Orchestrator(db=db, llm_client=fake_llm)
 
-        # Use the real orchestrator when CLI instantiates one
         def _mock_constructor(*, db):
-            db.init_schema()
-            return Orchestrator(db=db, llm_client=fake_llm)
+            test_db = Database(db_path)
+            test_db.init_schema()
+            return Orchestrator(db=test_db, llm_client=fake_llm)
 
         MockOrchestrator.side_effect = _mock_constructor
 

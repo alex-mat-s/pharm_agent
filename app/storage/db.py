@@ -178,6 +178,95 @@ class Database:
                 )
                 """
             )
+            # -----------------------------------------------------------------
+            # MVP2: scientific_sources
+            # -----------------------------------------------------------------
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scientific_sources (
+                    source_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                    source_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    url_or_path TEXT,
+                    external_id TEXT,
+                    publisher TEXT,
+                    publication_date TEXT,
+                    last_updated_date TEXT,
+                    retrieved_at TEXT NOT NULL,
+                    query_used TEXT,
+                    raw_payload_hash TEXT,
+                    citation_label TEXT,
+                    evidence_summary TEXT,
+                    reliability_notes TEXT
+                )
+                """
+            )
+            # -----------------------------------------------------------------
+            # MVP2: scientific_evidence_items
+            # -----------------------------------------------------------------
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scientific_evidence_items (
+                    evidence_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                    source_id TEXT NOT NULL,
+                    category TEXT,
+                    summary TEXT,
+                    key_findings TEXT,
+                    confidence TEXT,
+                    relevance_score REAL DEFAULT 0.0
+                )
+                """
+            )
+            # -----------------------------------------------------------------
+            # MVP2: scientific_connector_calls
+            # -----------------------------------------------------------------
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scientific_connector_calls (
+                    call_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                    connector_name TEXT NOT NULL,
+                    query_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    results_returned INTEGER DEFAULT 0,
+                    errors TEXT,
+                    duration_ms INTEGER,
+                    timestamp TEXT NOT NULL
+                )
+                """
+            )
+            # -----------------------------------------------------------------
+            # MVP2: scientific_outputs
+            # -----------------------------------------------------------------
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scientific_outputs (
+                    output_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                    output_json TEXT NOT NULL,
+                    schema_name TEXT,
+                    model_name TEXT,
+                    prompt_hash TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            # -----------------------------------------------------------------
+            # MVP2: scientific_memo_versions
+            # -----------------------------------------------------------------
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scientific_memo_versions (
+                    memo_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                    memo_path TEXT NOT NULL,
+                    content_hash TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def _migrate_pdf_files_table(self, conn: sqlite3.Connection) -> None:
@@ -594,3 +683,126 @@ class Database:
                     d["metadata"] = json.loads(d["metadata"])
                 results.append(d)
             return results
+
+    # =====================================================================
+    # MVP2: Scientific sources
+    # =====================================================================
+
+    def save_scientific_source(self, run_id: str, source: dict) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO scientific_sources
+                (source_id, run_id, source_type, title, url_or_path, external_id,
+                 publisher, publication_date, last_updated_date, retrieved_at,
+                 query_used, raw_payload_hash, citation_label, evidence_summary,
+                 reliability_notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source["source_id"], run_id, source["source_type"],
+                    source["title"], source.get("url_or_path"),
+                    source.get("external_id"), source.get("publisher"),
+                    source.get("publication_date"), source.get("last_updated_date"),
+                    source["retrieved_at"], source.get("query_used"),
+                    source.get("raw_payload_hash"), source.get("citation_label", ""),
+                    source.get("evidence_summary", ""),
+                    source.get("reliability_notes", ""),
+                ),
+            )
+            conn.commit()
+
+    def save_scientific_evidence_item(self, run_id: str, item: dict) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO scientific_evidence_items
+                (evidence_id, run_id, source_id, category, summary,
+                 key_findings, confidence, relevance_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item["evidence_id"], run_id, item["source_id"],
+                    item.get("category", "other"), item.get("summary", ""),
+                    json.dumps(item.get("key_findings", []), ensure_ascii=False),
+                    item.get("confidence", "medium"),
+                    item.get("relevance_score", 0.0),
+                ),
+            )
+            conn.commit()
+
+    def save_scientific_connector_call(self, log: dict) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO scientific_connector_calls
+                (run_id, connector_name, query_json, status, results_returned,
+                 errors, duration_ms, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log["run_id"], log["connector_name"], log["query_json"],
+                    log["status"], log.get("results_returned", 0),
+                    json.dumps(log.get("errors", []), ensure_ascii=False),
+                    log.get("duration_ms"), log["timestamp"],
+                ),
+            )
+            conn.commit()
+
+    def save_scientific_output(
+        self, run_id: str, output_json: str, *,
+        schema_name: str = "ScientificAgentOutput",
+        model_name: str = "", prompt_hash: str = "",
+    ) -> None:
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO scientific_outputs
+                (run_id, output_json, schema_name, model_name, prompt_hash, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, output_json, schema_name, model_name, prompt_hash, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO structured_outputs
+                (run_id, stage, output_json, schema_name, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id, "scientific_analysis", output_json, schema_name, now,
+                    json.dumps({"model": model_name, "prompt_hash": prompt_hash}),
+                ),
+            )
+            conn.commit()
+
+    def save_scientific_memo_version(
+        self, run_id: str, memo_path: str, content_hash: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO scientific_memo_versions
+                (run_id, memo_path, content_hash, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (run_id, memo_path, content_hash, _now_iso()),
+            )
+            conn.commit()
+
+    def get_scientific_sources(self, run_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scientific_sources WHERE run_id = ? ORDER BY source_id",
+                (run_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_scientific_output(self, run_id: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT output_json FROM scientific_outputs WHERE run_id = ? ORDER BY output_id DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            return row["output_json"] if row else None

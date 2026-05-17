@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,12 +11,14 @@ from app.orchestrator import Orchestrator, compute_input_hash
 from app.schemas.human_decision import HumanDecision
 from app.schemas.input import RawInput
 from app.schemas.intake_output import IntakeEnrichmentOutput
+from app.schemas.evidence import ConnectorQuery, ConnectorResult
 from app.schemas.run import RunStatus
+from app.schemas.scientific import ScientificAgentOutput
 from app.storage.db import Database
 
 
 class FakeStructuredLLMClient:
-    """Fake structured LLM client."""
+    """Fake structured LLM client that returns different outputs per output_model."""
 
     def __init__(self, return_value=None, should_fail=False):
         self.return_value = return_value or IntakeEnrichmentOutput(
@@ -31,6 +33,14 @@ class FakeStructuredLLMClient:
         self.calls.append(kwargs)
         if self.should_fail:
             raise StructuredOutputError("Validation failed after retry")
+        output_model = kwargs.get("output_model")
+        if output_model is ScientificAgentOutput:
+            return ScientificAgentOutput(
+                executive_summary="Aspirin is well-studied for stroke.",
+                evidence_gaps=["No novel data"],
+                source_ids_used=["pubmed:12345"],
+                confidence="medium",
+            )
         return self.return_value
 
     def close(self) -> None:
@@ -51,8 +61,34 @@ def _clear_audit_log(tmp_path, monkeypatch):
 def _mock_obsidian(tmp_path, monkeypatch):
     """Mock obsidian writer to avoid vault dir creation."""
     mock_writer = MagicMock()
+    mock_writer.write_scientific_memo.return_value = tmp_path / "memo.md"
+    (tmp_path / "memo.md").write_text("# Test memo", encoding="utf-8")
     monkeypatch.setattr("app.orchestrator.obsidian", mock_writer)
     return mock_writer
+
+
+def _empty_connector_result(name: str) -> ConnectorResult:
+    return ConnectorResult(
+        connector_name=name,
+        query=ConnectorQuery(inn="aspirin"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_connectors(monkeypatch):
+    """Mock all external connectors to return empty results."""
+    for cls_path in [
+        "app.orchestrator.PubMedConnector",
+        "app.orchestrator.ClinicalTrialsConnector",
+        "app.orchestrator.EMAConnector",
+    ]:
+        name = cls_path.split(".")[-1].replace("Connector", "").lower()
+        mock_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.search.return_value = _empty_connector_result(name)
+        mock_cls.return_value = mock_instance
+        mock_cls.connector_name = name
+        monkeypatch.setattr(cls_path, mock_cls)
 
 
 @pytest.fixture
@@ -127,7 +163,7 @@ def _make_orchestrator(tmp_db, should_fail=False):
 
 
 def test_orchestrator_happy_path(tmp_path, tmp_db):
-    """Full happy path: create → enrich → await verification → approve → completed."""
+    """Full happy path: create → enrich → verify → approve → scientific → completed."""
     orch, fake_llm = _make_orchestrator(tmp_db)
 
     pdf1 = tmp_path / "a.pdf"
@@ -147,6 +183,8 @@ def test_orchestrator_happy_path(tmp_path, tmp_db):
     )
     run = orch.submit_human_decision(run.run_id, dec)
     assert run.status == RunStatus.completed
+    # MVP2: scientific agent was called after approval
+    assert len(fake_llm.calls) == 2
 
 
 def test_orchestrator_rejected(tmp_path, tmp_db):
@@ -246,8 +284,8 @@ def test_orchestrator_unvalidated_output_never_saved(tmp_path, tmp_db):
 
 
 def test_two_phase_approved(tmp_path, tmp_db):
-    """Two-phase flow: run_until_verification → finalize_decision(approved) → completed with summary."""
-    orch, _ = _make_orchestrator(tmp_db)
+    """Two-phase flow: run_until_verification → finalize_decision(approved) → scientific → completed."""
+    orch, fake_llm = _make_orchestrator(tmp_db)
 
     pdf1 = tmp_path / "a.pdf"
     pdf2 = tmp_path / "b.pdf"
@@ -267,6 +305,12 @@ def test_two_phase_approved(tmp_path, tmp_db):
     assert summary.inn_preferred == "aspirin"
     assert summary.human_decision == "approved"
     assert summary.input_hash  # non-empty
+    # MVP2: scientific agent was called
+    assert len(fake_llm.calls) == 2
+
+    # Scientific output persisted
+    sci_output = tmp_db.get_scientific_output(run.run_id)
+    assert sci_output is not None
 
 
 def test_two_phase_rejected(tmp_path, tmp_db):

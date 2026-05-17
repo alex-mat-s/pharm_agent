@@ -15,6 +15,9 @@ class RunStatus(str, Enum):
     human_approved = "human_approved"
     human_rejected = "human_rejected"
     needs_revision = "needs_revision"
+    # MVP2 scientific stage
+    scientific_evidence_collected = "scientific_evidence_collected"
+    scientific_analyzed = "scientific_analyzed"
     completed = "completed"
     failed = "failed"
 
@@ -31,10 +34,20 @@ TRANSITIONS: dict[RunStatus, list[RunStatus]] = {
         RunStatus.needs_revision,
         RunStatus.failed,
     ],
-    RunStatus.human_approved: [RunStatus.completed],
+    RunStatus.human_approved: [
+        RunStatus.scientific_evidence_collected,
+        RunStatus.completed,
+        RunStatus.failed,
+    ],
     # Rejection is a first-class business outcome, not an internal failure.
     RunStatus.human_rejected: [RunStatus.completed, RunStatus.failed],
     RunStatus.needs_revision: [RunStatus.input_collected],
+    # MVP2 scientific stage transitions
+    RunStatus.scientific_evidence_collected: [
+        RunStatus.scientific_analyzed,
+        RunStatus.failed,
+    ],
+    RunStatus.scientific_analyzed: [RunStatus.completed, RunStatus.failed],
 }
 
 

@@ -22,7 +22,12 @@ VAULT_SUBDIRS = [
     "01_entities/drugs",
     "01_entities/diseases",
     "02_sources/pdfs",
+    "02_sources/pubmed",
+    "02_sources/clinicaltrials",
+    "02_sources/fda",
+    "02_sources/ema",
     "03_runs",
+    "04_reports/scientific",
     "05_decisions",
     "99_templates",
 ]
@@ -359,6 +364,223 @@ def write_decision_note(
     ]
 
     path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def write_scientific_memo(
+    run_id: str,
+    output: Any,
+    sources: list[Any] | None = None,
+    coverage: dict[str, str] | None = None,
+    pdf_hashes: dict[str, str] | None = None,
+    vault_dir: Path | None = None,
+) -> Path:
+    """Write a scientific analysis memo to the Obsidian vault reports folder."""
+    vd = ensure_vault_structure(vault_dir)
+    reports_dir = vd / "04_reports" / "scientific"
+    filename = f"{run_id}_scientific_memo.md"
+    path = reports_dir / filename
+
+    front: dict[str, Any] = {
+        "type": "scientific_memo",
+        "run_id": run_id,
+        "confidence": getattr(output, "confidence", "medium"),
+        "created_at": _now_iso(),
+    }
+    if pdf_hashes:
+        front["pdf_hashes"] = pdf_hashes
+    if coverage:
+        front["connector_coverage"] = coverage
+
+    lines = [
+        _frontmatter(front),
+        "",
+        f"# Scientific Memo — {run_id}",
+        "",
+        AUTO_BEGIN,
+        "",
+        "## Executive Summary",
+        "",
+        getattr(output, "executive_summary", "") or "(No executive summary)",
+        "",
+    ]
+
+    def _claim_section(title: str, claim: Any | None) -> list[str]:
+        if claim is None:
+            return [f"## {title}", "", "(Not assessed)", ""]
+        source_refs = ", ".join(getattr(claim, "source_ids", []))
+        return [
+            f"## {title}",
+            "",
+            getattr(claim, "claim", str(claim)),
+            f"Sources: {source_refs}" if source_refs else "",
+            "",
+        ]
+
+    lines += _claim_section("Mechanism of Action", getattr(output, "mechanism_of_action", None))
+    lines += _claim_section("Disease Pathophysiology", getattr(output, "disease_pathophysiology", None))
+    lines += _claim_section("Mechanistic Rationale", getattr(output, "mechanistic_rationale", None))
+
+    existing_evi = getattr(output, "existing_evidence", [])
+    lines += ["## Existing Evidence", ""]
+    if existing_evi:
+        for claim in existing_evi:
+            refs = ", ".join(getattr(claim, "source_ids", []))
+            lines.append(f"- {getattr(claim, 'claim', str(claim))} [{refs}]")
+    else:
+        lines.append("(No existing evidence entries)")
+    lines.append("")
+
+    lines += _claim_section("Standard of Care", getattr(output, "standard_of_care", None))
+
+    approved = getattr(output, "approved_therapies", [])
+    lines += ["## Approved Therapies", ""]
+    if approved:
+        for t in approved:
+            refs = ", ".join(getattr(t, "source_ids", []))
+            lines.append(f"- **{getattr(t, 'name', '')}**: {getattr(t, 'regulatory_status', '')} [{refs}]")
+    else:
+        lines.append("(No approved therapies found)")
+    lines.append("")
+
+    trials = getattr(output, "clinical_trial_landscape", [])
+    lines += ["## Clinical Trial Landscape", ""]
+    if trials:
+        for t in trials:
+            lines.append(
+                f"- **{getattr(t, 'nct_id', '')}**: {getattr(t, 'title', '')} "
+                f"(Phase {getattr(t, 'phase', '')}, {getattr(t, 'status', '')})"
+            )
+    else:
+        lines.append("(No clinical trials found)")
+    lines.append("")
+
+    safety = getattr(output, "safety_considerations", [])
+    lines += ["## Safety and Tolerability", ""]
+    if safety:
+        for s in safety:
+            refs = ", ".join(getattr(s, "source_ids", []))
+            lines.append(f"- {getattr(s, 'claim', str(s))} [{refs}]")
+    else:
+        lines.append("(No safety data)")
+    lines.append("")
+
+    lines += _claim_section("Unmet Medical Need", getattr(output, "unmet_medical_need", None))
+
+    for section_name, field_name in [
+        ("Scientific Risks", "scientific_risks"),
+        ("Evidence Gaps", "evidence_gaps"),
+        ("Contradictions", "contradictions"),
+        ("Uncertainties", "uncertainties"),
+        ("Assumptions", "assumptions"),
+    ]:
+        items = getattr(output, field_name, [])
+        lines += [f"## {section_name}", ""]
+        if items:
+            for item in items:
+                lines.append(f"- {item}")
+        else:
+            lines.append(f"(No {section_name.lower()})")
+        lines.append("")
+
+    # Source list
+    lines += ["## Sources", ""]
+    if sources:
+        for i, src in enumerate(sources, 1):
+            label = getattr(src, "citation_label", "") or getattr(src, "title", "")
+            sid = getattr(src, "source_id", "")
+            lines.append(f"{i}. [{sid}] {label}")
+    else:
+        ids = getattr(output, "source_ids_used", [])
+        for sid in ids:
+            lines.append(f"- {sid}")
+    lines.append("")
+
+    lines += [
+        "## Disclaimer",
+        "",
+        f"> {getattr(output, 'disclaimer', DISCLAIMER)}",
+        "",
+        AUTO_END,
+        "",
+    ]
+
+    _write_with_manual_preservation(path, lines)
+    return path
+
+
+def write_source_note(
+    source: "SourceRecord",
+    vault_dir: Path | None = None,
+) -> Path:
+    """Create or update a source note in the appropriate vault subfolder."""
+    from app.schemas.evidence import SourceType
+
+    vd = ensure_vault_structure(vault_dir)
+
+    type_to_subdir: dict[SourceType, tuple[str, str]] = {
+        SourceType.pubmed: ("02_sources/pubmed", "PMID"),
+        SourceType.clinicaltrials: ("02_sources/clinicaltrials", "NCT"),
+        SourceType.fda: ("02_sources/fda", "FDA"),
+        SourceType.ema: ("02_sources/ema", "EMA"),
+        SourceType.local_pdf: ("02_sources/pdfs", "PDF"),
+    }
+
+    subdir, prefix = type_to_subdir.get(source.source_type, ("02_sources", "SRC"))
+    target_dir = vd / subdir
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    ext_id = source.external_id or source.source_id.split(":", 1)[-1]
+    safe_id = slugify(ext_id, fallback=source.source_id.replace(":", "_"))
+    filename = f"{prefix}_{safe_id}.md"
+    path = target_dir / filename
+
+    front = {
+        "type": "source",
+        "source_id": source.source_id,
+        "source_type": source.source_type.value,
+        "title": source.title,
+        "external_id": source.external_id or "",
+        "publisher": source.publisher or "",
+        "retrieved_at": source.retrieved_at,
+    }
+    if source.publication_date:
+        front["publication_date"] = source.publication_date
+    if source.url_or_path:
+        front["url"] = source.url_or_path
+
+    lines = [
+        _frontmatter(front),
+        "",
+        f"# {source.title}",
+        "",
+        AUTO_BEGIN,
+        "",
+        f"- **Source ID:** {source.source_id}",
+        f"- **Type:** {source.source_type.value}",
+        f"- **External ID:** {source.external_id or 'N/A'}",
+        f"- **Publisher:** {source.publisher or 'N/A'}",
+        f"- **Publication date:** {source.publication_date or 'N/A'}",
+        f"- **Retrieved at:** {source.retrieved_at}",
+        f"- **Query used:** {source.query_used}",
+        "",
+        "## Summary",
+        "",
+        source.evidence_summary or "(No summary)",
+        "",
+        "## Citation",
+        "",
+        source.citation_label or "(No citation)",
+        "",
+    ]
+    if source.reliability_notes:
+        lines += ["## Reliability notes", "", source.reliability_notes, ""]
+    if source.url_or_path:
+        lines += ["## Link", "", source.url_or_path, ""]
+
+    lines += [AUTO_END, ""]
+
+    _write_with_manual_preservation(path, lines)
     return path
 
 

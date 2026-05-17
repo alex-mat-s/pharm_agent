@@ -18,6 +18,7 @@ class Config(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     default_openrouter_model: str = "openai/gpt-4o-mini"
+    llm_timeout_seconds: int = 300
 
     debug: bool = False
 

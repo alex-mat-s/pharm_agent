@@ -799,10 +799,28 @@ class Database:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_scientific_evidence_items(self, run_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scientific_evidence_items WHERE run_id = ? ORDER BY evidence_id",
+                (run_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def get_scientific_output(self, run_id: str) -> str | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT output_json FROM scientific_outputs WHERE run_id = ? ORDER BY output_id DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            return row["output_json"] if row else None
+
+    def get_market_output(self, run_id: str) -> str | None:
+        """Load market analysis JSON from stage_outputs."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT output_json FROM stage_outputs WHERE run_id = ? AND stage = 'market_analysis' "
+                "ORDER BY id DESC LIMIT 1",
                 (run_id,),
             ).fetchone()
             return row["output_json"] if row else None

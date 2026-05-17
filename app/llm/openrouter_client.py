@@ -35,7 +35,7 @@ class OpenRouterClient:
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.api_key}",
             }
-            self.client = httpx.Client(headers=headers, timeout=60.0)
+            self.client = httpx.Client(headers=headers, timeout=config.llm_timeout_seconds)
         return self.client
 
     def call(

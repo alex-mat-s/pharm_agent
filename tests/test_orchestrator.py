@@ -13,6 +13,7 @@ from app.schemas.input import RawInput
 from app.schemas.intake_output import IntakeEnrichmentOutput
 from app.schemas.evidence import ConnectorQuery, ConnectorResult
 from app.schemas.run import RunStatus
+from app.schemas.market import MarketAgentOutput, PatientPopulation
 from app.schemas.scientific import ScientificAgentOutput
 from app.storage.db import Database
 
@@ -39,6 +40,15 @@ class FakeStructuredLLMClient:
                 executive_summary="Aspirin is well-studied for stroke.",
                 evidence_gaps=["No novel data"],
                 source_ids_used=["pubmed:12345"],
+                confidence="medium",
+            )
+        if output_model is MarketAgentOutput:
+            return MarketAgentOutput(
+                market_summary="Aspirin market is mature with strong generic competition.",
+                patient_population=PatientPopulation(
+                    global_estimate="~100M stroke patients",
+                    target_segment="Secondary prevention",
+                ),
                 confidence="medium",
             )
         return self.return_value
@@ -183,8 +193,8 @@ def test_orchestrator_happy_path(tmp_path, tmp_db):
     )
     run = orch.submit_human_decision(run.run_id, dec)
     assert run.status == RunStatus.completed
-    # MVP2: scientific agent was called after approval
-    assert len(fake_llm.calls) == 2
+    # MVP2 + MVP3: scientific + market agents called after approval
+    assert len(fake_llm.calls) == 3
 
 
 def test_orchestrator_rejected(tmp_path, tmp_db):
@@ -305,12 +315,16 @@ def test_two_phase_approved(tmp_path, tmp_db):
     assert summary.inn_preferred == "aspirin"
     assert summary.human_decision == "approved"
     assert summary.input_hash  # non-empty
-    # MVP2: scientific agent was called
-    assert len(fake_llm.calls) == 2
+    # MVP2 + MVP3: scientific + market agents called
+    assert len(fake_llm.calls) == 3
 
     # Scientific output persisted
     sci_output = tmp_db.get_scientific_output(run.run_id)
     assert sci_output is not None
+
+    # Market output persisted
+    market_output = tmp_db.get_market_output(run.run_id)
+    assert market_output is not None
 
 
 def test_two_phase_rejected(tmp_path, tmp_db):

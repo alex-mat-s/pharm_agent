@@ -28,6 +28,7 @@ VAULT_SUBDIRS = [
     "02_sources/ema",
     "03_runs",
     "04_reports/scientific",
+    "04_reports/market",
     "05_decisions",
     "99_templates",
 ]
@@ -579,6 +580,201 @@ def write_source_note(
         lines += ["## Link", "", source.url_or_path, ""]
 
     lines += [AUTO_END, ""]
+
+    _write_with_manual_preservation(path, lines)
+    return path
+
+
+def write_market_memo(
+    run_id: str,
+    output: Any,
+    sources: list[Any] | None = None,
+    pdf_hashes: dict[str, str] | None = None,
+    vault_dir: Path | None = None,
+) -> Path:
+    """Write a market attractiveness memo to the Obsidian vault."""
+    vd = ensure_vault_structure(vault_dir)
+    reports_dir = vd / "04_reports" / "market"
+    filename = f"{run_id}_market_memo.md"
+    path = reports_dir / filename
+
+    front: dict[str, Any] = {
+        "type": "market_memo",
+        "run_id": run_id,
+        "confidence": getattr(output, "confidence", "medium"),
+        "created_at": _now_iso(),
+        "depends_on": ["scientific_memo"],
+    }
+    if pdf_hashes:
+        front["pdf_hashes"] = pdf_hashes
+
+    lines = [
+        _frontmatter(front),
+        "",
+        f"# Market Memo — {run_id}",
+        "",
+        AUTO_BEGIN,
+        "",
+        "## Executive Summary",
+        "",
+        getattr(output, "market_summary", "") or "(No market summary)",
+        "",
+    ]
+
+    # Patient Population
+    pop = getattr(output, "patient_population", None)
+    lines += ["## Patient Population", ""]
+    if pop:
+        if hasattr(pop, "global_estimate") and pop.global_estimate:
+            lines.append(f"- **Global:** {pop.global_estimate}")
+        if hasattr(pop, "us_estimate") and pop.us_estimate:
+            lines.append(f"- **US:** {pop.us_estimate}")
+        if hasattr(pop, "eu_estimate") and pop.eu_estimate:
+            lines.append(f"- **EU:** {pop.eu_estimate}")
+        if hasattr(pop, "ru_estimate") and pop.ru_estimate:
+            lines.append(f"- **RU:** {pop.ru_estimate}")
+        if hasattr(pop, "target_segment") and pop.target_segment:
+            lines.append(f"- **Target segment:** {pop.target_segment}")
+        if hasattr(pop, "segmentation_logic") and pop.segmentation_logic:
+            lines.append(f"- **Segmentation logic:** {pop.segmentation_logic}")
+    else:
+        lines.append("(Not assessed)")
+    lines.append("")
+
+    # Treatment Landscape
+    treatment = getattr(output, "treatment_landscape", None)
+    if treatment:
+        lines += ["## Treatment Landscape", "", treatment, ""]
+
+    # Market Size
+    market_size = getattr(output, "market_size_estimate", None)
+    if market_size:
+        lines += ["## Market Size Estimate", "", market_size, ""]
+
+    # Competitors
+    competitors = getattr(output, "competitors", [])
+    lines += ["## Competitor Landscape", ""]
+    if competitors:
+        lines.append("| Препарат | Компания | Статус | Механизм | Цена |")
+        lines.append("|---|---|---|---|---|")
+        for c in competitors:
+            name = getattr(c, "drug_name", "?")
+            company = getattr(c, "company", "") or ""
+            status = getattr(c, "status", "")
+            mech = getattr(c, "mechanism", "") or ""
+            price = getattr(c, "price_range", "") or ""
+            refs = ", ".join(getattr(c, "source_ids", []))
+            lines.append(f"| {name} | {company} | {status} | {mech} | {price} |")
+            if refs:
+                lines[-1] += f" [{refs}]"
+    else:
+        lines.append("(No competitors identified)")
+    lines.append("")
+
+    # Market Dynamics
+    dynamics = getattr(output, "market_dynamics", [])
+    lines += ["## Market Dynamics", ""]
+    if dynamics:
+        for d in dynamics:
+            direction = getattr(d, "direction", "neutral")
+            icon = {"positive": "📈", "negative": "📉", "neutral": "➡️"}.get(direction, "•")
+            desc = getattr(d, "description", str(d))
+            refs = ", ".join(getattr(d, "source_ids", []))
+            line = f"- {icon} {desc}"
+            if refs:
+                line += f" [{refs}]"
+            lines.append(line)
+    else:
+        lines.append("(Not assessed)")
+    lines.append("")
+
+    # Payer Value
+    payer = getattr(output, "payer_value", None)
+    if payer:
+        lines += ["## Payer Value Proposition", "", payer, ""]
+
+    # Pricing Logic
+    pricing = getattr(output, "pricing_logic", None)
+    if pricing:
+        lines += ["## Pricing Logic", "", pricing, ""]
+
+    # Price Benchmarks
+    benchmarks = getattr(output, "competitor_price_benchmarks", [])
+    if benchmarks:
+        lines += ["## Competitor Price Benchmarks", ""]
+        lines.append("| Препарат | Цена | Валюта | Путь | Частота |")
+        lines.append("|---|---|---|---|---|")
+        for b in benchmarks:
+            name = getattr(b, "drug_name", "?")
+            price = getattr(b, "price_description", "?")
+            curr = getattr(b, "currency", "USD")
+            route = getattr(b, "route", "") or ""
+            freq = getattr(b, "frequency", "") or ""
+            lines.append(f"| {name} | {price} | {curr} | {route} | {freq} |")
+        lines.append("")
+
+    # Differentiation
+    diff_opps = getattr(output, "differentiation_opportunities", [])
+    if diff_opps:
+        lines += ["## Differentiation Opportunities", ""]
+        for d in diff_opps:
+            lines.append(f"- {d}")
+        lines.append("")
+
+    # Commercial Risks
+    risks = getattr(output, "commercial_risks", [])
+    lines += ["## Commercial Risks", ""]
+    if risks:
+        for r in risks:
+            severity = getattr(r, "severity", "medium")
+            icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "•")
+            risk_text = getattr(r, "risk", str(r))
+            mitigation = getattr(r, "mitigation", None)
+            refs = ", ".join(getattr(r, "source_ids", []))
+            line = f"- {icon} **{risk_text}**"
+            if mitigation:
+                line += f"\n  Mitigation: {mitigation}"
+            if refs:
+                line += f" [{refs}]"
+            lines.append(line)
+    else:
+        lines.append("(No risks identified)")
+    lines.append("")
+
+    # Assumptions and missing info
+    assumptions = getattr(output, "assumptions", [])
+    if assumptions:
+        lines += ["## Assumptions", ""]
+        for a in assumptions:
+            lines.append(f"- {a}")
+        lines.append("")
+
+    missing = getattr(output, "missing_information", [])
+    if missing:
+        lines += ["## Missing Information", ""]
+        for m in missing:
+            lines.append(f"- {m}")
+        lines.append("")
+
+    # Sources
+    src_list = getattr(output, "sources", [])
+    if src_list:
+        lines += ["## Sources", ""]
+        for i, s in enumerate(src_list, 1):
+            sid = getattr(s, "source_id", "?")
+            title = getattr(s, "title", "")
+            label = getattr(s, "citation_label", title)
+            lines.append(f"{i}. [{sid}] {label}")
+        lines.append("")
+
+    lines += [
+        "## Disclaimer",
+        "",
+        f"> {DISCLAIMER}",
+        "",
+        AUTO_END,
+        "",
+    ]
 
     _write_with_manual_preservation(path, lines)
     return path

@@ -1,0 +1,30 @@
+---
+description: Documentation update requirement after feature changes
+alwaysApply: true
+---
+
+# Documentation Update Rule
+
+## README must stay current
+
+After adding, changing, or removing a feature, update `README.md` to reflect the change before considering the task complete.
+
+Sections to check:
+- Feature list / capabilities.
+- CLI usage and flags.
+- Configuration / environment variables.
+- Architecture overview if structural changes were made.
+- Installation or dependency instructions if new packages were added.
+
+## When to update
+
+- New CLI flag or command → add to usage section.
+- New connector, agent, or pipeline stage → add to feature list and architecture.
+- New env variable → add to README and `.env.example`.
+- Removed or renamed feature → remove or rename in README.
+
+## What NOT to do
+
+- Do not bloat README with implementation details — keep it user-facing.
+- Do not duplicate docstrings or code comments into README.
+- Do not update README for pure refactors that don't change external behavior.

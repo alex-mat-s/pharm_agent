@@ -1,0 +1,77 @@
+---
+description: Logging and audit rules for the pharma agent pipeline.
+globs:
+  - "app/logging/**/*.py"
+  - "app/connectors/**/*.py"
+  - "app/agents/**/*.py"
+  - "app/llm/**/*.py"
+alwaysApply: false
+---
+
+# Logging Rules
+
+## Audit-first development
+
+Every meaningful action must be auditable. Three logging levels:
+
+1. **Audit log** — full JSONL, append-only
+2. **Debug log** — technical errors, retries, parsing failures
+3. **Human-readable run log** — Markdown in Obsidian
+
+## Required audit event types
+
+For all pipeline stages:
+- `stage_started`, `stage_completed`, `stage_failed`
+- `llm_call_started`, `llm_call_completed`, `llm_validation_failed`, `llm_repair_attempted`
+- `human_decision`
+- `obsidian_note_written`
+- `sqlite_persisted`
+
+For connectors (MVP 2+):
+- `connector_call_started`, `connector_call_completed`, `connector_call_failed`
+- `pdf_retrieval_started`, `pdf_retrieval_completed`
+- `evidence_normalized`, `evidence_ranked`
+
+## LLM call log fields
+
+- run_id, step_name, model, provider
+- messages, response_format, schema name/version
+- raw response, parsed response, validation errors
+- repair retry prompt if used
+- token usage, latency_ms, cost estimate
+
+## Connector call log fields
+
+- run_id, connector_name, query parameters
+- request URL (without secrets), timestamp
+- status code, latency_ms, response hash
+- result count, pagination info, errors
+
+## Mandatory audit log format
+
+```json
+{
+  "run_id": "...",
+  "step": "...",
+  "event_type": "llm_call",
+  "timestamp": "...",
+  "model": "...",
+  "messages": [],
+  "tools_available": [],
+  "tool_calls": [],
+  "raw_response": {},
+  "parsed_response": {},
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cost_usd": 0.0,
+  "latency_ms": 0,
+  "source_refs": [],
+  "errors": []
+}
+```
+
+## Privacy and safety
+
+Never log: API keys, authorization headers, cookies, passwords, personal medical data, unnecessary absolute paths.
+
+Use central redaction function before writing logs.

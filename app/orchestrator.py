@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from app.agents.intake_enrichment_agent import IntakeEnrichmentAgent
+from app.agents.market_agent import MarketAgent
 from app.agents.scientific_agent import ScientificAgent
 from app.connectors.clinicaltrials import ClinicalTrialsConnector
 from app.connectors.ema import EMAConnector
+
 # from app.connectors.fda import FDAConnector  # FDA недоступен без прокси
 from app.connectors.pubmed import PubMedConnector
 from app.evidence.citations import build_citation_list
@@ -27,6 +29,7 @@ from app.schemas.evidence import ConnectorQuery, ConnectorResult
 from app.schemas.human_decision import HumanDecision
 from app.schemas.input import RawInput
 from app.schemas.intake_output import HumanVerificationPacket
+from app.schemas.market import MarketAgentInput, MarketAgentOutput
 from app.schemas.pdf import PDFExtractionResult, PDFMetadata, PDFVersionStatus
 from app.schemas.run import MVP1Summary, RunRecord, RunStatus, StageOutput
 from app.schemas.scientific import ScientificAgentInput, ScientificAgentOutput
@@ -251,6 +254,9 @@ class Orchestrator:
             )
 
         # MVP2: run scientific analysis stage
+        logging.getLogger("pharm_agent.orchestrator").info(
+            "[%s] Starting scientific analysis stage...", run_id
+        )
         try:
             self._run_scientific_stage(run_id, enrichment, pdf_hashes)
         except (StructuredOutputError, Exception) as exc:
@@ -260,11 +266,24 @@ class Orchestrator:
             obsidian.write_run_note(run)
             return run, summary
 
+        # MVP3: run market analysis stage
+        logging.getLogger("pharm_agent.orchestrator").info(
+            "[%s] Starting market analysis stage...", run_id
+        )
+        try:
+            self._run_market_stage(run_id, enrichment, pdf_hashes)
+        except (StructuredOutputError, Exception) as exc:
+            run = self.db.update_run_status(run_id, RunStatus.failed, error=str(exc))
+            self._log(run_id, "market_analysis", "error", "failed",
+                      {"error": str(exc)})
+            obsidian.write_run_note(run)
+            return run, summary
+
         # Gate 2 placeholder: in future MVPs, scientific + market conclusions
         # will be presented to the human for verification before proceeding
         # to patent/finance analysis. For now, we log and continue.
         self._log(run_id, "gate_2_placeholder", "state_change", "succeeded",
-                  {"note": "Gate 2 (scientific review before patent/finance) not yet implemented"})
+                  {"note": "Gate 2 (scientific+market review before patent/finance) not yet implemented"})
 
         run = self.db.update_run_status(run_id, RunStatus.completed)
         self._log(run_id, "completed", "state_change", "succeeded")
@@ -409,6 +428,98 @@ class Orchestrator:
         self.db.save_scientific_memo_version(
             run_id, str(memo_path), _hl.sha256(memo_text.encode()).hexdigest()[:16],
         )
+
+        return output
+
+    def _run_market_stage(
+        self,
+        run_id: str,
+        enrichment: dict[str, Any],
+        pdf_hashes: dict[str, str],
+    ) -> MarketAgentOutput:
+        """Run market attractiveness analysis using scientific stage outputs."""
+        inn_data = enrichment.get("normalized_inn", {})
+        disease_data = enrichment.get("normalized_disease") or {}
+
+        # Load scientific output from DB for context
+        scientific_json = self.db.get_scientific_output(run_id)
+        sci_output: dict[str, Any] = {}
+        if scientific_json:
+            import contextlib
+            with contextlib.suppress(json.JSONDecodeError):
+                sci_output = json.loads(scientific_json)
+
+        # Reuse evidence already collected in the scientific stage
+        stored_sources = self.db.get_scientific_sources(run_id)
+        stored_evidence = self.db.get_scientific_evidence_items(run_id)
+
+        from app.schemas.evidence import EvidenceItem, SourceRecord
+        all_sources = [SourceRecord.model_validate(s) for s in stored_sources]
+        all_evidence = []
+        for e_row in stored_evidence:
+            if isinstance(e_row.get("key_findings"), str):
+                e_row["key_findings"] = json.loads(e_row["key_findings"])
+            all_evidence.append(EvidenceItem.model_validate(e_row))
+
+        # Build market agent input
+        approved_therapies_raw = sci_output.get("approved_therapies", [])
+        pipeline_raw = sci_output.get("clinical_trial_landscape", [])
+
+        agent_input = MarketAgentInput(
+            run_id=run_id,
+            inn_preferred=inn_data.get("preferred_name", ""),
+            inn_english=inn_data.get("english_inn"),
+            inn_synonyms=inn_data.get("synonyms", []),
+            disease_preferred=disease_data.get("preferred_name"),
+            disease_synonyms=disease_data.get("synonyms", []),
+            region=enrichment.get("region"),
+            molecule_type=inn_data.get("molecule_type", "unknown"),
+            stage=enrichment.get("stage"),
+            scientific_summary=sci_output.get("executive_summary", ""),
+            approved_therapies_json=json.dumps(approved_therapies_raw, ensure_ascii=False)
+            if approved_therapies_raw else None,
+            clinical_pipeline_json=json.dumps(pipeline_raw, ensure_ascii=False)
+            if pipeline_raw else None,
+            unmet_need=(
+                sci_output.get("unmet_medical_need", {}).get("text")
+                if isinstance(sci_output.get("unmet_medical_need"), dict)
+                else sci_output.get("unmet_medical_need")
+            ),
+            evidence_items_json=json.dumps(
+                [e.model_dump(mode="json") for e in all_evidence], ensure_ascii=False
+            ),
+            sources_json=json.dumps(
+                [s.model_dump(mode="json") for s in all_sources], ensure_ascii=False
+            ),
+            pdf_hashes=pdf_hashes,
+        )
+
+        # Call market agent
+        agent = MarketAgent(client=self._get_llm_client())
+        output = agent.run(agent_input, all_sources, all_evidence)
+
+        # Persist market output
+        output_json = json.dumps(output.model_dump(mode="json"), ensure_ascii=False)
+        self.db.save_stage_output(StageOutput(
+            run_id=run_id,
+            stage="market_analysis",
+            output_json=output_json,
+            status="succeeded",
+            created_at=_now_iso(),
+        ))
+
+        self.db.update_run_status(run_id, RunStatus.market_analyzed)
+        self._log(run_id, "market_analyzed", "state_change", "succeeded")
+
+        # Write market memo to Obsidian
+        memo_path = obsidian.write_market_memo(
+            run_id=run_id,
+            output=output,
+            sources=all_sources,
+            pdf_hashes=pdf_hashes,
+        )
+        self._log(run_id, "market_memo_written", "tool_call", "succeeded",
+                  {"path": str(memo_path)})
 
         return output
 

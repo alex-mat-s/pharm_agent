@@ -60,6 +60,7 @@ class IntakeEnrichmentAgent:
             disease_raw=raw_input.disease_raw or "N/A",
             region=raw_input.region or "N/A",
             molecule_type=raw_input.molecule_type or "N/A",
+            stage=raw_input.stage or "N/A",
             pdf_context=pdf_context,
         )
 

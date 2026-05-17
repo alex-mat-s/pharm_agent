@@ -1,94 +1,153 @@
 ---
-description: "Project-wide context for the Pharma Agent MVP 1 deterministic skeleton. Applies to all Cursor Agent work in this repository."
+description: Core project rules for the pharma agent system across all MVPs.
+globs: []
 alwaysApply: true
 ---
 
-# Project Rule: Pharma Agent MVP 1
+# Pharma Agent Project Rules
 
 ## Product goal
 
-Build a deterministic AI-assisted pharma analysis skeleton.
+Build a deterministic AI-assisted pharma R&D analysis tool.
 
 The system accepts:
-- INN / МНН as required input.
-- Disease / indication as optional but strongly recommended input.
-- Exactly two local PDF documents for MVP 1.
+- INN / МНН (required)
+- disease / indication (optional but strongly recommended)
+- region, molecule type, development stage, target market (optional)
+- local PDF documents as supplementary knowledge
 
 The system produces:
-- A normalized and enriched input packet.
-- A mandatory human verification packet.
-- Structured intermediate outputs for later scientific, market, patent, and finance agents.
-- Obsidian Markdown notes.
-- SQLite run records.
-- JSONL audit logs for every important operation, especially LLM calls.
+- A normalized and enriched input packet (MVP 1)
+- A mandatory human verification packet (MVP 1)
+- Scientific & clinical landscape memo (MVP 2)
+- Market attractiveness analysis (MVP 3)
+- Patent landscape + financial viability analysis (MVP 4)
+- Synthesis + QA + final report (MVP 5)
+- Obsidian Markdown notes for every stage
+- SQLite run records
+- JSONL audit logs for every important operation
 
-## MVP 1 scope
+## Final output goal
 
-Implement only the deterministic skeleton:
-- CLI or simple local web form.
-- Input collection: МНН + disease + two PDF files.
-- PDF hash watcher / change detector.
-- PDF ingestion interface with an initial local extractor implementation.
-- Obsidian vault writer.
-- SQLite storage for runs, files, decisions, and stage outputs.
-- JSONL audit logs.
-- OpenRouter client wrapper.
-- Structured LLM outputs validated with schemas.
-- Mandatory human verification via terminal or local web UI.
+The final report covers three pillars:
+1. Scientific rationale: mechanism, evidence, standard of care, unmet need, pipeline
+2. Commercial attractiveness: market size, competitors, pricing, payer value
+3. Financial & patent viability: patent landscape, FTO risks, investment scenarios, monetization windows
 
-## Explicit non-goals for MVP 1
+The final report must cite sources, state assumptions, and highlight uncertainty zones.
 
-Do not implement full scientific, market, patent, or finance intelligence yet.
-For MVP 1, create interfaces, schemas, stubs, and deterministic flow points that later agents can use.
+## MVP roadmap
 
-Do not implement paid data integrations.
-Do not implement autonomous background execution without explicit user action.
-Do not skip human verification.
-Do not create medical advice functionality.
-Do not present patent analysis as legal advice.
+### MVP 1 — deterministic skeleton (intake enrichment)
+- CLI or simple web form
+- Input: МНН + disease + PDF files
+- PDF hash watcher and change detection
+- PDF text extraction (page-level)
+- Intake enrichment via OpenRouter structured output
+- Obsidian vault writer
+- SQLite for runs, PDFs, decisions, stage outputs
+- JSONL audit logs
+- Mandatory human verification
+- Placeholder downstream stage records
+
+### MVP 2 — scientific agent
+- PubMed, ClinicalTrials.gov, FDA, EMA connectors
+- PDF retrieval from ingested local PDFs
+- Source normalization and citation tracking
+- Evidence ranking
+- Scientific Agent structured output
+- Scientific memo Markdown writer
+
+### MVP 3 — market agent
+- Competitor extraction
+- Treatment landscape
+- Prevalence/incidence source collection
+- Payer/value narrative
+- Pricing proxy
+
+### MVP 4 — patent/finance agent
+- Orange Book / Purple Book
+- EPO OPS / patent search
+- Patent family clustering
+- Rough investment model
+- Financial scenarios with monetization windows
+
+### MVP 5 — QA + report generation
+- Source coverage check
+- Contradiction check
+- Stale PDF check
+- Final Markdown report
+- Export to PDF
 
 ## Preferred stack
 
-Use Python unless the user explicitly asks otherwise.
-
-Recommended defaults:
 - Python 3.11+
+- Virtual environment: `.venv` in project root (always use `.venv/bin/python` for running code and tests)
 - Typer for CLI
-- FastAPI only if a simple web form is requested
+- FastAPI for web form (when requested)
 - Pydantic for schemas
 - SQLite for MVP storage
-- SQLAlchemy or sqlite-utils for database access
 - pathlib for filesystem paths
-- python-dotenv for local environment loading
+- python-dotenv / pydantic-settings for environment
 - httpx for API calls
+- PyMuPDF for PDF extraction
 - pytest for tests
 - ruff for linting
 
-Keep dependencies minimal and documented.
-
 ## Repository structure
-
-Prefer this structure:
 
 ```text
 pharm-agent/
   app/
-    main.py
     orchestrator.py
+    config.py
+    cli.py
     agents/
-    tools/
+      intake_enrichment_agent.py
+      scientific_agent.py
+      market_agent.py           # MVP 3
+      patent_finance_agent.py   # MVP 4
+      synthesis_agent.py        # MVP 5
+      qa_agent.py               # MVP 5
+    connectors/
+      base.py
+      pubmed.py
+      clinicaltrials.py
+      fda.py
+      ema.py
+    evidence/
+      normalization.py
+      ranking.py
+      citations.py
+    pdf/
+      reader.py
+      watcher.py
+      retrieval.py
+    llm/
+      openrouter_client.py
+      structured_client.py
     schemas/
+      input.py
+      intake_output.py
+      human_decision.py
+      run.py
+      pdf.py
+      evidence.py
+      scientific.py
+      audit.py
     storage/
-    ui/
+      db.py
+    logging/
+      audit_logger.py
+    obsidian/
+      writer.py
+    ui/                         # web form when implemented
   prompts/
   config/
   pdfs/
   vault/
   logs/
   tests/
-  .clinerules/
-  .env.example
-  README.md
 ```
 
 ## Coding principles
@@ -96,27 +155,26 @@ pharm-agent/
 - Keep the pipeline deterministic and inspectable.
 - Prefer explicit state transitions over hidden agent autonomy.
 - Validate every external or LLM-derived output with Pydantic schemas.
-- Keep runtime agent prompts in `/prompts`, not in `.clinerules`.
-- Keep configuration in `/config`, not hardcoded in business logic.
+- Keep runtime agent prompts in `/prompts`, not in `.cursor/rules`.
+- Keep configuration in `/config` or environment variables, not hardcoded.
 - Make every stage resumable from saved state.
 - Make every stage reproducible from stored input, PDF hashes, prompts, model name, and outputs.
 - Fail closed when data is missing, ambiguous, or unvalidated.
 
 ## Language rules
 
-- Code, identifiers, and comments may be in English.
-- User-facing CLI messages, Obsidian reports, and README examples may be in Russian unless the user requests English.
-- Preserve pharma terms in both Russian and English when useful, for example: `МНН / INN`, `заболевание / indication`.
+- Code, identifiers, and comments: English.
+- User-facing CLI/web messages, Obsidian reports: Russian unless user requests English.
+- Preserve pharma terms in both languages: МНН / INN, заболевание / indication.
 
-## Done definition for MVP 1
+## Non-negotiable rules
 
-A run is considered complete when:
-- The raw input is stored.
-- Both PDFs are registered with hashes.
-- PDF changes can be detected.
-- The intake enrichment stage can call OpenRouter and parse a structured response.
-- The user must approve or reject the normalized input.
-- The human decision is stored in SQLite and Obsidian.
-- All LLM calls and important system events are written to JSONL audit logs.
-- A run note exists in the Obsidian vault.
-- Unit tests cover the critical deterministic components.
+1. Always use the project `.venv` environment: `.venv/bin/python`, `.venv/bin/pytest`, etc. Never use the system Python.
+2. Never bypass human verification.
+3. Every LLM output must validate against a Pydantic schema.
+4. Never store unvalidated LLM output as application state.
+5. Never overwrite audit logs.
+6. Never log secrets or API keys.
+7. Never present output as patient-facing medical advice.
+8. Every material claim must be traceable to a source.
+9. Every external source call must be logged.

@@ -1,143 +1,80 @@
 ---
-description: "Testing rules for the Pharma Agent MVP 1 deterministic skeleton."
+description: Testing rules for the pharma agent pipeline.
 globs:
-  - "tests/**"
-  - "app/**"
+  - "tests/**/*.py"
+  - "app/**/*.py"
 alwaysApply: false
 ---
 
-# Testing Rule
+# Testing Rules
 
-## Testing goal
+## Philosophy
 
-MVP 1 must be deterministic and safe to refactor.
-Prioritize tests for pipeline control, schemas, persistence, logging, PDF hash detection, and human verification gates.
+All external dependencies (OpenRouter, PubMed, ClinicalTrials.gov, FDA, EMA) must be testable without live access.
+Use mocked HTTP responses for unit tests.
 
-## Test framework
+## MVP 1 test categories
 
-Use pytest.
-Use temporary directories for filesystem tests.
-Use temporary SQLite databases for storage tests.
-Mock all network and OpenRouter calls in unit tests.
+### Schemas
+- RawInput validation and edge cases
+- NormalizedINN, NormalizedDisease validation
+- IntakeEnrichmentOutput completeness
+- HumanDecision variants
+- RunStatus transitions
 
-Do not require live API keys for unit tests.
+### PDF handling
+- SHA-256 hash computation
+- New/unchanged/updated detection
+- Text extraction produces correct chunks
+- Missing file handling
 
-## Required test categories
+### Intake enrichment agent
+- Calls LLM with correct prompts
+- Returns validated IntakeEnrichmentOutput
+- Retries on validation failure
+- Raises StructuredOutputError after retry exhaustion
 
-### Schema tests
+### Structured LLM client
+- Validates against Pydantic model
+- Repair retry on validation failure
+- Logs all attempts
 
-Test that Pydantic schemas:
-- accept valid raw input;
-- reject missing required INN;
-- handle optional disease;
-- validate stage statuses;
-- validate human decisions;
-- reject malformed LLM structured outputs.
+### Orchestrator
+- Full flow: create -> PDFs -> enrich -> verify -> approve -> complete
+- Rejection flow
+- Needs revision flow
+- Failed enrichment flow
+- Status transitions are valid
 
-### PDF watcher tests
+### Obsidian writer
+- Run note creation and update
+- Drug and disease entity notes
+- Decision notes
+- PDF source notes
 
-Test:
-- SHA-256 hash computation;
-- unchanged PDF detection;
-- updated PDF detection;
-- missing PDF error handling;
-- requirement for exactly two PDFs in MVP 1.
+### CLI
+- Command parsing
+- Input validation
+- Human verification interaction
 
-### SQLite tests
+## MVP 2+ test categories
 
-Test:
-- run creation;
-- status updates;
-- invalid status transitions;
-- PDF metadata persistence;
-- stage output persistence;
-- human decision persistence.
+### Connectors (PubMed, ClinicalTrials, FDA, EMA)
+- Correct query building
+- Result parsing
+- Zero results handling
+- HTTP error handling
+- Malformed response handling
 
-### Audit logging tests
+### Scientific agent
+- Requires human-approved input
+- Validates structured output
+- Handles partial connector failures
 
-Test:
-- JSONL event writing;
-- one JSON object per line;
-- required fields;
-- redaction of secrets;
-- LLM call event structure;
-- error event structure.
+## Golden fixtures
 
-### OpenRouter client tests
+Create fixtures for: known INN/disease pair, test PDFs, mock API responses, valid/invalid agent outputs.
 
-Use mocked HTTP responses.
-Test:
-- successful structured output parsing;
-- validation error handling;
-- retry policy;
-- timeout handling;
-- redaction of headers in logs;
-- no direct API key exposure.
+## Coverage priority
 
-### Obsidian writer tests
-
-Test:
-- vault directory creation;
-- Markdown frontmatter generation;
-- run note creation;
-- PDF source note creation;
-- preservation of manual sections when updating generated sections;
-- filename slugification.
-
-### Orchestrator tests
-
-Test the full MVP 1 flow with mocks:
-- create run;
-- register PDFs;
-- ingest PDFs;
-- call mocked intake enrichment;
-- require human approval;
-- stop on rejection;
-- complete on approval;
-- write SQLite, audit log, and Obsidian artifacts.
-
-## CLI tests
-
-If Typer CLI is implemented, use `CliRunner`.
-Test:
-- happy path with mocked LLM;
-- missing INN;
-- missing PDF;
-- rejected verification;
-- approved verification.
-
-## Snapshot tests
-
-Snapshot tests are allowed for Markdown outputs, but keep them focused.
-If a snapshot changes, Cline must explain why.
-
-## Integration tests
-
-Integration tests may use local files and SQLite.
-Live OpenRouter tests must be optional and skipped unless an explicit environment variable is set.
-
-Example:
-
-```text
-RUN_LIVE_OPENROUTER_TESTS=1
-```
-
-## Test commands
-
-Keep these commands working:
-
-```bash
-pytest
-ruff check .
-ruff format --check .
-```
-
-If the project uses a different toolchain, update README and this rule file together.
-
-## Done definition for changes
-
-For any change to core pipeline behavior, Cline must:
-- add or update tests;
-- run the relevant tests when feasible;
-- report which tests were run;
-- report any tests not run and why.
+Behavior coverage over line coverage. Critical paths: schema validation, evidence normalization, memo writing, failure handling.

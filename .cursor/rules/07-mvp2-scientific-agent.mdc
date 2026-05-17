@@ -1,0 +1,80 @@
+---
+description: Implementation rules for the MVP 2 Scientific Agent.
+globs:
+  - "app/agents/scientific_agent.py"
+  - "app/schemas/scientific.py"
+  - "app/prompts/scientific_agent*.md"
+  - "tests/agents/**/*scientific*.py"
+alwaysApply: false
+---
+
+# MVP 2 Scientific Agent Rules
+
+## Role
+
+The Scientific Agent answers: "Is there a scientifically and clinically plausible rationale for developing this INN for this disease?"
+
+## Pipeline steps
+
+1. Load approved MVP 1 run context
+2. Retrieve relevant local PDF chunks
+3. Run PubMed search
+4. Run ClinicalTrials.gov search
+5. Run FDA lookup
+6. Run EMA lookup
+7. Normalize all evidence into common source schema
+8. Rank and deduplicate evidence
+9. Call Scientific Agent LLM with structured output
+10. Validate response
+11. Persist to SQLite
+12. Write scientific memo to Obsidian
+13. Update run note
+
+## Scientific Agent output schema
+
+Required fields:
+- executive_summary
+- mechanism_of_action (ScientificFinding with claim, interpretation, source_ids, confidence)
+- disease_pathophysiology
+- mechanistic_rationale
+- existing_evidence
+- current_standard_of_care
+- approved_therapies
+- clinical_pipeline
+- safety_considerations
+- unmet_medical_need
+- scientific_risks
+- evidence_gaps
+- source_ids_used
+- confidence_notes
+- disclaimer
+
+## Output validation
+
+1. Call LLM with structured output
+2. Validate with Pydantic
+3. Check referenced source IDs exist
+4. Check required source categories present or in evidence gaps
+5. Attempt one repair retry on failure
+6. Persist only validated output
+
+## Scientific memo sections
+
+1. Executive summary
+2. Input recap
+3. Mechanism of action
+4. Disease pathophysiology
+5. Mechanistic rationale
+6. Evidence from local PDFs
+7. PubMed evidence
+8. ClinicalTrials.gov evidence
+9. FDA evidence
+10. EMA evidence
+11. Standard of care
+12. Approved therapies
+13. Pipeline trials
+14. Safety considerations
+15. Unmet need
+16. Scientific risks and evidence gaps
+17. Source table
+18. Disclaimer

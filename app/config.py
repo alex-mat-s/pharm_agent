@@ -19,6 +19,8 @@ class Config(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     default_openrouter_model: str = "openai/gpt-4o-mini"
 
+    debug: bool = False
+
     pdfs_dir: Path = Path("./pdfs")
     vault_dir: Path = Path("./vault")
     logs_dir: Path = Path("./logs")

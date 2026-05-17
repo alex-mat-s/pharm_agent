@@ -1,0 +1,143 @@
+---
+description: "Testing rules for the Pharma Agent MVP 1 deterministic skeleton."
+globs:
+  - "tests/**"
+  - "app/**"
+alwaysApply: false
+---
+
+# Testing Rule
+
+## Testing goal
+
+MVP 1 must be deterministic and safe to refactor.
+Prioritize tests for pipeline control, schemas, persistence, logging, PDF hash detection, and human verification gates.
+
+## Test framework
+
+Use pytest.
+Use temporary directories for filesystem tests.
+Use temporary SQLite databases for storage tests.
+Mock all network and OpenRouter calls in unit tests.
+
+Do not require live API keys for unit tests.
+
+## Required test categories
+
+### Schema tests
+
+Test that Pydantic schemas:
+- accept valid raw input;
+- reject missing required INN;
+- handle optional disease;
+- validate stage statuses;
+- validate human decisions;
+- reject malformed LLM structured outputs.
+
+### PDF watcher tests
+
+Test:
+- SHA-256 hash computation;
+- unchanged PDF detection;
+- updated PDF detection;
+- missing PDF error handling;
+- requirement for exactly two PDFs in MVP 1.
+
+### SQLite tests
+
+Test:
+- run creation;
+- status updates;
+- invalid status transitions;
+- PDF metadata persistence;
+- stage output persistence;
+- human decision persistence.
+
+### Audit logging tests
+
+Test:
+- JSONL event writing;
+- one JSON object per line;
+- required fields;
+- redaction of secrets;
+- LLM call event structure;
+- error event structure.
+
+### OpenRouter client tests
+
+Use mocked HTTP responses.
+Test:
+- successful structured output parsing;
+- validation error handling;
+- retry policy;
+- timeout handling;
+- redaction of headers in logs;
+- no direct API key exposure.
+
+### Obsidian writer tests
+
+Test:
+- vault directory creation;
+- Markdown frontmatter generation;
+- run note creation;
+- PDF source note creation;
+- preservation of manual sections when updating generated sections;
+- filename slugification.
+
+### Orchestrator tests
+
+Test the full MVP 1 flow with mocks:
+- create run;
+- register PDFs;
+- ingest PDFs;
+- call mocked intake enrichment;
+- require human approval;
+- stop on rejection;
+- complete on approval;
+- write SQLite, audit log, and Obsidian artifacts.
+
+## CLI tests
+
+If Typer CLI is implemented, use `CliRunner`.
+Test:
+- happy path with mocked LLM;
+- missing INN;
+- missing PDF;
+- rejected verification;
+- approved verification.
+
+## Snapshot tests
+
+Snapshot tests are allowed for Markdown outputs, but keep them focused.
+If a snapshot changes, Cline must explain why.
+
+## Integration tests
+
+Integration tests may use local files and SQLite.
+Live OpenRouter tests must be optional and skipped unless an explicit environment variable is set.
+
+Example:
+
+```text
+RUN_LIVE_OPENROUTER_TESTS=1
+```
+
+## Test commands
+
+Keep these commands working:
+
+```bash
+pytest
+ruff check .
+ruff format --check .
+```
+
+If the project uses a different toolchain, update README and this rule file together.
+
+## Done definition for changes
+
+For any change to core pipeline behavior, Cline must:
+- add or update tests;
+- run the relevant tests when feasible;
+- report which tests were run;
+- report any tests not run and why.

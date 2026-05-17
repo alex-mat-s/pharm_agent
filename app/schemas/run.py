@@ -19,7 +19,6 @@ class RunStatus(str, Enum):
     failed = "failed"
 
 
-# Valid transition graph used by orchestrator and DB.
 TRANSITIONS: dict[RunStatus, list[RunStatus]] = {
     RunStatus.created: [RunStatus.input_collected, RunStatus.failed],
     RunStatus.input_collected: [RunStatus.pdfs_registered, RunStatus.failed],
@@ -33,7 +32,8 @@ TRANSITIONS: dict[RunStatus, list[RunStatus]] = {
         RunStatus.failed,
     ],
     RunStatus.human_approved: [RunStatus.completed],
-    RunStatus.human_rejected: [RunStatus.failed],
+    # Rejection is a first-class business outcome, not an internal failure.
+    RunStatus.human_rejected: [RunStatus.completed, RunStatus.failed],
     RunStatus.needs_revision: [RunStatus.input_collected],
 }
 
@@ -50,6 +50,7 @@ class RunRecord(BaseModel):
     created_at: str  # ISO-8601
     updated_at: str  # ISO-8601
     raw_input_json: str
+    input_hash: str | None = None
     enrichment_output_json: str | None = None
     human_decision_json: str | None = None
     final_summary_json: str | None = None
@@ -64,3 +65,22 @@ class StageOutput(BaseModel):
     output_json: str
     created_at: str  # ISO-8601
     metadata: dict = Field(default_factory=dict)
+
+
+class MVP1Summary(BaseModel):
+    """Final summary produced after human approval for MVP 1."""
+
+    run_id: str
+    inn_preferred: str
+    inn_english: str | None = None
+    inn_russian: str | None = None
+    disease_preferred: str | None = None
+    input_hash: str
+    pdf_hashes: dict[str, str] = Field(default_factory=dict)
+    enrichment_completeness: str = "medium"
+    human_decision: str = "approved"
+    disclaimer: str = (
+        "This analysis is for R&D and investment research only. "
+        "It is not medical advice, clinical guidance, or a substitute "
+        "for qualified professional review."
+    )

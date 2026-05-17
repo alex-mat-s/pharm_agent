@@ -1,4 +1,7 @@
-from pathlib import Path
+"""Tests for SQLite storage layer: runs, steps, PDFs, human decisions, structured outputs, audit events."""
+from __future__ import annotations
+
+import sqlite3
 
 import pytest
 
@@ -7,66 +10,129 @@ from app.schemas.input import RawInput
 from app.schemas.intake_output import IntakeEnrichmentOutput
 from app.schemas.pdf import PDFMetadata
 from app.schemas.run import RunStatus
+from app.schemas.audit import AuditEvent
 from app.storage.db import Database
 
 
-def test_create_run(tmp_path: Path):
+@pytest.fixture
+def tmp_db(tmp_path):
     db = Database(tmp_path / "test.sqlite")
     db.init_schema()
+    return db
+
+
+# =====================================================================
+# Runs
+# =====================================================================
+
+
+def test_create_run(tmp_db):
     raw = RawInput(inn_raw="aspirin", disease_raw="stroke")
-    run = db.create_run(raw)
+    run = tmp_db.create_run(raw)
     assert run.status == RunStatus.created
     assert run.run_id.startswith("run_")
 
 
-def test_update_status_valid(tmp_path: Path):
-    db = Database(tmp_path / "test.sqlite")
-    db.init_schema()
-    run = db.create_run(RawInput(inn_raw="aspirin"))
-    run = db.update_run_status(run.run_id, RunStatus.input_collected)
+def test_update_status_valid(tmp_db):
+    run = tmp_db.create_run(RawInput(inn_raw="aspirin"))
+    run = tmp_db.update_run_status(run.run_id, RunStatus.input_collected)
     assert run.status == RunStatus.input_collected
 
 
-def test_update_status_invalid(tmp_path: Path):
-    db = Database(tmp_path / "test.sqlite")
-    db.init_schema()
-    run = db.create_run(RawInput(inn_raw="aspirin"))
+def test_update_status_invalid(tmp_db):
+    run = tmp_db.create_run(RawInput(inn_raw="aspirin"))
     with pytest.raises(ValueError):
-        db.update_run_status(run.run_id, RunStatus.completed)
+        tmp_db.update_run_status(run.run_id, RunStatus.completed)
 
 
-def test_save_enrichment_output(tmp_path: Path):
-    db = Database(tmp_path / "test.sqlite")
-    db.init_schema()
-    run = db.create_run(RawInput(inn_raw="aspirin"))
+# =====================================================================
+# Run steps
+# =====================================================================
+
+
+def test_run_steps(tmp_db):
+    run = tmp_db.create_run(RawInput(inn_raw="aspirin"))
+    tmp_db.upsert_run_step(run.run_id, "pdf_extraction", "started")
+    steps = tmp_db.get_run_steps(run.run_id)
+    assert len(steps) == 1
+    assert steps[0]["step_name"] == "pdf_extraction"
+    assert steps[0]["status"] == "started"
+
+    # Update
+    tmp_db.upsert_run_step(run.run_id, "pdf_extraction", "completed", details={"pages": 42})
+    steps = tmp_db.get_run_steps(run.run_id)
+    assert steps[0]["status"] == "completed"
+
+
+# =====================================================================
+# Enrichment output & structured_outputs table
+# =====================================================================
+
+
+def test_save_enrichment_output(tmp_db):
+    run = tmp_db.create_run(RawInput(inn_raw="aspirin"))
     out = IntakeEnrichmentOutput(
         normalized_inn={"preferred_name": "Aspirin"},
         completeness="medium",
     )
-    db.save_enrichment_output(run.run_id, out)
-    fetched = db.get_run(run.run_id)
+    tmp_db.save_enrichment_output(run.run_id, out)
+    fetched = tmp_db.get_run(run.run_id)
     assert fetched is not None
     assert fetched.enrichment_output_json is not None
 
+    # Also check structured_outputs table
+    # (we can inspect via stage_outputs since save_enrichment_output mirrors there too)
 
-def test_save_human_decision(tmp_path: Path):
-    db = Database(tmp_path / "test.sqlite")
-    db.init_schema()
-    run = db.create_run(RawInput(inn_raw="aspirin"))
+
+# =====================================================================
+# Human decisions
+# =====================================================================
+
+
+def test_save_human_decision(tmp_db):
+    run = tmp_db.create_run(RawInput(inn_raw="aspirin"))
     dec = HumanDecision(
         run_id=run.run_id,
         decision="approved",
+        corrections={"inn_raw": "acetylsalicylic acid"},
+        comments="Looks good",
+        reviewer_name="Alice",
         timestamp="2026-05-11T10:00:00+00:00",
     )
-    db.save_human_decision(run.run_id, dec)
-    fetched = db.get_run(run.run_id)
+    tmp_db.save_human_decision(run.run_id, dec)
+
+    # Via dedicated table
+    fetched = tmp_db.get_human_decision(run.run_id)
     assert fetched is not None
-    assert fetched.human_decision_json is not None
+    assert fetched.decision == "approved"
+    assert fetched.corrections["inn_raw"] == "acetylsalicylic acid"
+    assert fetched.reviewer_name == "Alice"
 
 
-def test_pdf_register_and_fetch(tmp_path: Path):
-    db = Database(tmp_path / "test.sqlite")
-    db.init_schema()
+def test_save_human_decision_overwrite(tmp_db):
+    run = tmp_db.create_run(RawInput(inn_raw="aspirin"))
+    dec1 = HumanDecision(
+        run_id=run.run_id,
+        decision="needs_revision",
+        timestamp="2026-05-11T10:00:00+00:00",
+    )
+    tmp_db.save_human_decision(run.run_id, dec1)
+    dec2 = HumanDecision(
+        run_id=run.run_id,
+        decision="approved",
+        timestamp="2026-05-11T11:00:00+00:00",
+    )
+    tmp_db.save_human_decision(run.run_id, dec2)
+    fetched = tmp_db.get_human_decision(run.run_id)
+    assert fetched.decision == "approved"
+
+
+# =====================================================================
+# PDFs
+# =====================================================================
+
+
+def test_pdf_register_and_fetch(tmp_db):
     meta = PDFMetadata(
         pdf_id="source_1",
         filename="test.pdf",
@@ -77,7 +143,171 @@ def test_pdf_register_and_fetch(tmp_path: Path):
         ingested_at="2026-05-11T10:00:00+00:00",
         last_seen_at="2026-05-11T10:00:00+00:00",
     )
-    db.register_pdf(meta)
-    fetched = db.get_pdf_by_sha256("abc123")
+    tmp_db.register_pdf(meta)
+    fetched = tmp_db.get_pdf_by_sha256("abc123")
     assert fetched is not None
     assert fetched.pdf_id == "source_1"
+    assert fetched.page_count == 10
+
+
+def test_pdf_version_tracking(tmp_db):
+    run = tmp_db.create_run(RawInput(inn_raw="aspirin"))
+    meta = PDFMetadata(
+        pdf_id="source_1",
+        filename="test.pdf",
+        sha256="abc123",
+        size_bytes=1024,
+        page_count=10,
+        modified_timestamp="2026-05-11T10:00:00+00:00",
+        ingested_at="2026-05-11T10:00:00+00:00",
+        last_seen_at="2026-05-11T10:00:00+00:00",
+    )
+    tmp_db.register_pdf(meta)
+    tmp_db.register_pdf_version(run.run_id, "source_1", "abc123", "new")
+
+    versions = tmp_db.get_pdf_versions_for_run(run.run_id)
+    assert len(versions) == 1
+    assert versions[0]["sha256"] == "abc123"
+    assert versions[0]["version_label"] == "new"
+
+
+def test_pdf_register_updates_last_seen(tmp_db):
+    meta = PDFMetadata(
+        pdf_id="source_1",
+        filename="test.pdf",
+        sha256="abc123",
+        size_bytes=1024,
+        page_count=10,
+        modified_timestamp="2026-05-11T10:00:00+00:00",
+        ingested_at="2026-05-11T10:00:00+00:00",
+        last_seen_at="2026-05-11T10:00:00+00:00",
+    )
+    tmp_db.register_pdf(meta)
+
+    meta2 = PDFMetadata(
+        pdf_id="source_1",
+        filename="test.pdf",
+        sha256="abc123",
+        size_bytes=2048,
+        page_count=12,
+        modified_timestamp="2026-05-12T10:00:00+00:00",
+        ingested_at="2026-05-11T10:00:00+00:00",
+        last_seen_at="2026-05-12T10:00:00+00:00",
+    )
+    tmp_db.register_pdf(meta2)
+
+    fetched = tmp_db.get_pdf_by_sha256("abc123")
+    assert fetched is not None
+    assert fetched.size_bytes == 2048
+    assert fetched.page_count == 12
+
+
+def test_init_schema_migrates_legacy_pdf_files_table(tmp_path):
+    db_path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE pdf_files (
+            sha256 TEXT PRIMARY KEY,
+            pdf_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            page_count INTEGER,
+            modified_timestamp TEXT,
+            ingested_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO pdf_files (
+            sha256, pdf_id, filename, size_bytes, page_count,
+            modified_timestamp, ingested_at, last_seen_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "legacy_hash",
+            "source_1",
+            "legacy.pdf",
+            123,
+            2,
+            "2026-05-11T10:00:00+00:00",
+            "2026-05-11T10:00:00+00:00",
+            "2026-05-11T10:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    db.init_schema()
+
+    fetched = db.get_pdf_by_sha256("legacy_hash")
+    assert fetched is not None
+    assert fetched.pdf_id == "source_1"
+
+    # The migrated table must support the new composite-key upsert target.
+    db.register_pdf(
+        PDFMetadata(
+            pdf_id="source_2",
+            filename="new.pdf",
+            sha256="legacy_hash",
+            size_bytes=456,
+            page_count=3,
+            modified_timestamp="2026-05-12T10:00:00+00:00",
+            ingested_at="2026-05-12T10:00:00+00:00",
+            last_seen_at="2026-05-12T10:00:00+00:00",
+        )
+    )
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT pdf_id, sha256 FROM pdf_files WHERE sha256 = ? ORDER BY pdf_id",
+        ("legacy_hash",),
+    ).fetchall()
+    conn.close()
+    assert rows == [("source_1", "legacy_hash"), ("source_2", "legacy_hash")]
+
+
+# =====================================================================
+# Audit events (SQLite mirror)
+# =====================================================================
+
+
+def test_save_audit_event(tmp_db):
+    run = tmp_db.create_run(RawInput(inn_raw="aspirin"))
+    event = AuditEvent(
+        event_id="evt_001",
+        run_id=run.run_id,
+        stage="intake_enrichment",
+        event_type="llm_call",
+        timestamp="2026-05-11T10:00:00+00:00",
+        status="succeeded",
+        metadata={"model": "gpt-4o-mini", "latency_ms": 1200},
+    )
+    tmp_db.save_audit_event(event)
+    events = tmp_db.get_audit_events(run.run_id)
+    assert len(events) == 1
+    assert events[0]["event_type"] == "llm_call"
+    parsed_meta = {"model": "gpt-4o-mini", "latency_ms": 1200}
+    assert events[0]["metadata"] == parsed_meta
+
+
+def test_audit_events_multiple(tmp_db):
+    run = tmp_db.create_run(RawInput(inn_raw="aspirin"))
+    for i, status in enumerate(["started", "succeeded"]):
+        tmp_db.save_audit_event(
+            AuditEvent(
+                event_id=f"evt_{i}",
+                run_id=run.run_id,
+                stage="pdf_register",
+                event_type="tool_call",
+                timestamp=f"2026-05-11T10:0{i}:00+00:00",
+                status=status,  # type: ignore[arg-type]
+            )
+        )
+    events = tmp_db.get_audit_events(run.run_id)
+    assert len(events) == 2
+    assert events[0]["status"] == "started"
+    assert events[1]["status"] == "succeeded"

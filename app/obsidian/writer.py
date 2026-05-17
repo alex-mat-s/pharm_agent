@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,11 @@ from app.schemas.input import NormalizedDisease, NormalizedINN
 from app.schemas.pdf import PDFExtractionResult
 from app.schemas.run import RunRecord
 
+DISCLAIMER = (
+    "This analysis is for R&D and investment research only. "
+    "It is not medical advice, clinical guidance, or a substitute "
+    "for qualified professional review."
+)
 
 VAULT_SUBDIRS = [
     "00_inputs",
@@ -22,6 +27,9 @@ VAULT_SUBDIRS = [
     "99_templates",
 ]
 
+AUTO_BEGIN = "<!-- BEGIN AUTO-GENERATED -->"
+AUTO_END = "<!-- END AUTO-GENERATED -->"
+
 
 def ensure_vault_structure(vault_dir: Path | None = None) -> Path:
     """Create all required vault subdirectories."""
@@ -31,9 +39,16 @@ def ensure_vault_structure(vault_dir: Path | None = None) -> Path:
     return vd
 
 
-def slugify(name: str) -> str:
-    """Convert a string to a slugified filename."""
-    return re.sub(r"[^a-z0-9-]+", "-", name.lower().strip()).strip("-")
+def slugify(name: str, fallback: str = "unknown") -> str:
+    """Convert a string to an ASCII-safe slugified filename.
+
+    Falls back to *fallback* when the input contains no Latin alphanumeric
+    characters (e.g. pure Cyrillic names).
+    """
+    slug = re.sub(r"[^a-z0-9-]+", "-", name.lower().strip()).strip("-")
+    if not slug:
+        slug = re.sub(r"[^a-z0-9-]+", "-", fallback.lower().strip()).strip("-")
+    return slug or "unknown"
 
 
 def _frontmatter(data: dict[str, Any]) -> str:
@@ -54,6 +69,20 @@ def _frontmatter(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _write_with_manual_preservation(path: Path, lines: list[str]) -> None:
+    """Write auto-generated content while preserving any manual sections below the marker."""
+    new_content = "\n".join(lines)
+
+    if path.exists():
+        old = path.read_text(encoding="utf-8")
+        # Preserve anything the user wrote after END AUTO-GENERATED
+        if AUTO_END in old:
+            manual_part = old.split(AUTO_END, 1)[1]
+            new_content = new_content + manual_part
+
+    path.write_text(new_content, encoding="utf-8")
+
+
 def write_run_note(record: RunRecord, vault_dir: Path | None = None) -> Path:
     """Create or update a run note in the Obsidian vault."""
     vd = ensure_vault_structure(vault_dir)
@@ -68,17 +97,21 @@ def write_run_note(record: RunRecord, vault_dir: Path | None = None) -> Path:
         "created_at": record.created_at,
         "updated_at": record.updated_at,
     }
+    if record.input_hash:
+        front["input_hash"] = record.input_hash
 
     lines = [
         _frontmatter(front),
         "",
         f"# Run {record.run_id}",
         "",
+        AUTO_BEGIN,
+        "",
         "## Input",
         "",
-        f"```json",
+        "```json",
         f"{record.raw_input_json}",
-        f"```",
+        "```",
         "",
         "## Status",
         f"Current status: **{record.status.value}**",
@@ -93,18 +126,9 @@ def write_run_note(record: RunRecord, vault_dir: Path | None = None) -> Path:
             "```",
             "",
         ]
-    if record.human_decision_json:
-        lines += [
-            "## Human decision",
-            "",
-            "```json",
-            f"{record.human_decision_json}",
-            "```",
-            "",
-        ]
     if record.final_summary_json:
         lines += [
-            "## Final summary",
+            "## Final MVP 1 Summary",
             "",
             "```json",
             f"{record.final_summary_json}",
@@ -117,8 +141,16 @@ def write_run_note(record: RunRecord, vault_dir: Path | None = None) -> Path:
             f"{record.error_message}",
             "",
         ]
+    lines += [
+        "## Disclaimer",
+        "",
+        f"> {DISCLAIMER}",
+        "",
+        AUTO_END,
+        "",
+    ]
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    _write_with_manual_preservation(path, lines)
     return path
 
 
@@ -147,6 +179,8 @@ def write_pdf_source_note(
         "",
         f"# {result.pdf_id}",
         "",
+        AUTO_BEGIN,
+        "",
         "## Extraction status",
         f"Pages extracted: {result.page_count}",
         "",
@@ -156,12 +190,13 @@ def write_pdf_source_note(
     for chunk in result.chunks:
         lines.append(f"### Page {chunk.page_number}")
         lines.append(f"Characters: {chunk.char_count}")
-        # Store first 200 chars as preview
         preview = chunk.text[:200].replace("\n", " ")
         lines.append(f"Preview: {preview}...")
         lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    lines += [AUTO_END, ""]
+
+    _write_with_manual_preservation(path, lines)
     return path
 
 
@@ -173,7 +208,10 @@ def write_drug_entity_note(
     """Create or update a drug entity note."""
     vd = ensure_vault_structure(vault_dir)
     drug_dir = vd / "01_entities" / "drugs"
-    slug = slugify(inn.preferred_name or inn.english_inn or "unknown")
+    slug = slugify(
+        inn.preferred_name,
+        fallback=inn.english_inn or inn.russian_name or "unknown-drug",
+    )
     filename = f"{slug}.md"
     path = drug_dir / filename
 
@@ -193,6 +231,8 @@ def write_drug_entity_note(
         "",
         f"# {inn.preferred_name}",
         "",
+        AUTO_BEGIN,
+        "",
         "## Identity",
         "",
         f"- INN (EN): {inn.english_inn or 'N/A'}",
@@ -205,16 +245,18 @@ def write_drug_entity_note(
         "",
         *(f"- {s}" for s in inn.synonyms),
         "",
+        AUTO_END,
+        "",
         "## MVP 1 notes",
         "",
         "(Human-verified placeholder. Add free-form notes here.)",
         "",
-        f"## Linked runs",
+        "## Linked runs",
         f"- [[{run_id}]]",
         "",
     ]
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    _write_with_manual_preservation(path, lines)
     return path
 
 
@@ -226,7 +268,10 @@ def write_disease_entity_note(
     """Create or update a disease entity note."""
     vd = ensure_vault_structure(vault_dir)
     disease_dir = vd / "01_entities" / "diseases"
-    slug = slugify(disease.preferred_name)
+    slug = slugify(
+        disease.preferred_name,
+        fallback=next((s for s in disease.synonyms if re.search(r"[a-z]", s, re.I)), "unknown-disease"),
+    )
     filename = f"{slug}.md"
     path = disease_dir / filename
 
@@ -244,6 +289,8 @@ def write_disease_entity_note(
         "",
         f"# {disease.preferred_name}",
         "",
+        AUTO_BEGIN,
+        "",
         "## Identity",
         "",
         f"- MeSH: {', '.join(disease.mesh) or 'N/A'}",
@@ -254,16 +301,18 @@ def write_disease_entity_note(
         "",
         *(f"- {s}" for s in disease.subtypes),
         "",
+        AUTO_END,
+        "",
         "## MVP 1 notes",
         "",
         "(Human-verified placeholder. Add free-form notes here.)",
         "",
-        f"## Linked runs",
+        "## Linked runs",
         f"- [[{run_id}]]",
         "",
     ]
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    _write_with_manual_preservation(path, lines)
     return path
 
 
@@ -314,4 +363,4 @@ def write_decision_note(
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

@@ -1,19 +1,16 @@
 """Tests for Orchestrator with mocked LLM client to avoid API calls."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
-from app.orchestrator import Orchestrator
 from app.llm.structured_client import StructuredOutputError
+from app.orchestrator import Orchestrator, compute_input_hash
 from app.schemas.human_decision import HumanDecision
 from app.schemas.input import RawInput
 from app.schemas.intake_output import IntakeEnrichmentOutput
-from app.schemas.pdf import PDFChunk
 from app.schemas.run import RunStatus
 from app.storage.db import Database
 
@@ -22,7 +19,6 @@ class FakeStructuredLLMClient:
     """Fake structured LLM client."""
 
     def __init__(self, return_value=None, should_fail=False):
-        from app.schemas.intake_output import IntakeEnrichmentOutput
         self.return_value = return_value or IntakeEnrichmentOutput(
             normalized_inn={"preferred_name": "aspirin"},
             normalized_disease={"preferred_name": "stroke"},
@@ -125,8 +121,13 @@ def _make_orchestrator(tmp_db, should_fail=False):
     return Orchestrator(db=tmp_db, llm_client=fake_llm), fake_llm
 
 
+# =====================================================================
+# Legacy .run() + .submit_human_decision() tests (backward compat)
+# =====================================================================
+
+
 def test_orchestrator_happy_path(tmp_path, tmp_db):
-    """Full happy path: create run → ingest PDFs → enrich → await verification → approve → completed."""
+    """Full happy path: create → enrich → await verification → approve → completed."""
     orch, fake_llm = _make_orchestrator(tmp_db)
 
     pdf1 = tmp_path / "a.pdf"
@@ -137,9 +138,8 @@ def test_orchestrator_happy_path(tmp_path, tmp_db):
     raw = RawInput(inn_raw="aspirin", disease_raw="stroke")
     run = orch.run(raw, [pdf1, pdf2])
     assert run.status == RunStatus.awaiting_human_verification
-    assert len(fake_llm.calls) == 1  # one LLM call
+    assert len(fake_llm.calls) == 1
 
-    # Approve
     dec = HumanDecision(
         run_id=run.run_id,
         decision="approved",
@@ -150,7 +150,7 @@ def test_orchestrator_happy_path(tmp_path, tmp_db):
 
 
 def test_orchestrator_rejected(tmp_path, tmp_db):
-    """Full rejected path."""
+    """Rejected path ends with completed (not failed)."""
     orch, _ = _make_orchestrator(tmp_db)
 
     pdf1 = tmp_path / "a.pdf"
@@ -168,11 +168,11 @@ def test_orchestrator_rejected(tmp_path, tmp_db):
         timestamp="2026-05-11T10:00:00+00:00",
     )
     run = orch.submit_human_decision(run.run_id, dec)
-    assert run.status == RunStatus.failed
+    assert run.status == RunStatus.completed
 
 
 def test_orchestrator_enrichment_failure(tmp_path, tmp_db):
-    """When LLM returns invalid output, run should be marked failed with no unvalidated data saved."""
+    """When LLM returns invalid output, run should be marked failed."""
     orch, _ = _make_orchestrator(tmp_db, should_fail=True)
 
     pdf1 = tmp_path / "a.pdf"
@@ -188,7 +188,7 @@ def test_orchestrator_enrichment_failure(tmp_path, tmp_db):
 
 
 def test_orchestrator_pdf_extraction_once(tmp_path, tmp_db):
-    """PDFs should be extracted exactly once, not twice."""
+    """PDFs should be extracted exactly once."""
     orch, _ = _make_orchestrator(tmp_db)
 
     pdf1 = tmp_path / "a.pdf"
@@ -196,19 +196,13 @@ def test_orchestrator_pdf_extraction_once(tmp_path, tmp_db):
     _write_minimal_pdf(pdf1)
     _write_minimal_pdf(pdf2)
 
-    # Mock the reader to count calls
-    call_count = {"count": 0}
-    original_extract = orch._register_and_ingest_pdfs.__wrapped__ if hasattr(orch._register_and_ingest_pdfs, "__wrapped__") else None
-
-    # Just verify the pipeline completes — extraction deduplication is internal
     raw = RawInput(inn_raw="aspirin")
     run = orch.run(raw, [pdf1, pdf2])
     assert run.status == RunStatus.awaiting_human_verification
 
-    # Check DB has extraction results
     outputs = tmp_db.get_stage_outputs(run.run_id)
     extraction_outputs = [o for o in outputs if o.stage == "pdf_extraction"]
-    assert len(extraction_outputs) == 2  # both PDFs stored
+    assert len(extraction_outputs) == 2
 
 
 def test_orchestrator_page_count_updated(tmp_path, tmp_db):
@@ -223,12 +217,12 @@ def test_orchestrator_page_count_updated(tmp_path, tmp_db):
     raw = RawInput(inn_raw="aspirin")
     orch.run(raw, [pdf1, pdf2])
 
-    # Check PDF metadata in DB
     from app.pdf import watcher
     h1 = watcher.compute_sha256(pdf1)
     meta1 = tmp_db.get_pdf_by_sha256(h1)
     assert meta1 is not None
-    assert meta1.page_count >= 1  # minimal PDF has at least 1 page
+    assert meta1.page_count >= 1
+
 
 def test_orchestrator_unvalidated_output_never_saved(tmp_path, tmp_db):
     """When enrichment fails, enrichment_output_json should be None/empty in DB."""
@@ -243,5 +237,94 @@ def test_orchestrator_unvalidated_output_never_saved(tmp_path, tmp_db):
     run = orch.run(raw, [pdf1, pdf2])
 
     assert run.status == RunStatus.failed
-    # The enrichment output should NOT be saved
     assert not run.enrichment_output_json or run.enrichment_output_json == "{}"
+
+
+# =====================================================================
+# Two-phase flow tests (run_until_verification + finalize_decision)
+# =====================================================================
+
+
+def test_two_phase_approved(tmp_path, tmp_db):
+    """Two-phase flow: run_until_verification → finalize_decision(approved) → completed with summary."""
+    orch, _ = _make_orchestrator(tmp_db)
+
+    pdf1 = tmp_path / "a.pdf"
+    pdf2 = tmp_path / "b.pdf"
+    _write_minimal_pdf(pdf1)
+    _write_minimal_pdf(pdf2)
+
+    raw = RawInput(inn_raw="aspirin", disease_raw="stroke")
+    run, packet = orch.run_until_verification(raw, [pdf1, pdf2])
+    assert run.status == RunStatus.awaiting_human_verification
+    assert packet is not None
+    assert packet.raw_inn == "aspirin"
+
+    dec = HumanDecision(run_id=run.run_id, decision="approved", timestamp="2026-05-17T00:00:00+00:00")
+    run, summary = orch.finalize_decision(run.run_id, dec)
+    assert run.status == RunStatus.completed
+    assert summary is not None
+    assert summary.inn_preferred == "aspirin"
+    assert summary.human_decision == "approved"
+    assert summary.input_hash  # non-empty
+
+
+def test_two_phase_rejected(tmp_path, tmp_db):
+    """Two-phase flow: rejected run completes with no summary."""
+    orch, _ = _make_orchestrator(tmp_db)
+
+    pdf1 = tmp_path / "a.pdf"
+    pdf2 = tmp_path / "b.pdf"
+    _write_minimal_pdf(pdf1)
+    _write_minimal_pdf(pdf2)
+
+    raw = RawInput(inn_raw="aspirin")
+    run, packet = orch.run_until_verification(raw, [pdf1, pdf2])
+    assert run.status == RunStatus.awaiting_human_verification
+
+    dec = HumanDecision(run_id=run.run_id, decision="rejected", timestamp="2026-05-17T00:00:00+00:00")
+    run, summary = orch.finalize_decision(run.run_id, dec)
+    assert run.status == RunStatus.completed
+    assert summary is None
+
+
+def test_input_hash_deterministic():
+    """Same input should produce the same hash."""
+    raw = RawInput(inn_raw="aspirin", disease_raw="stroke")
+    h1 = compute_input_hash(raw)
+    h2 = compute_input_hash(raw)
+    assert h1 == h2
+    assert len(h1) == 64
+
+
+def test_input_hash_stored_in_db(tmp_path, tmp_db):
+    """Input hash should be persisted in the runs table."""
+    orch, _ = _make_orchestrator(tmp_db)
+
+    pdf1 = tmp_path / "a.pdf"
+    pdf2 = tmp_path / "b.pdf"
+    _write_minimal_pdf(pdf1)
+    _write_minimal_pdf(pdf2)
+
+    raw = RawInput(inn_raw="aspirin")
+    run, _ = orch.run_until_verification(raw, [pdf1, pdf2])
+
+    fetched = tmp_db.get_run(run.run_id)
+    assert fetched is not None
+    assert fetched.input_hash
+    assert len(fetched.input_hash) == 64
+
+
+def test_enrichment_failure_returns_none_packet(tmp_path, tmp_db):
+    """When enrichment fails, packet should be None."""
+    orch, _ = _make_orchestrator(tmp_db, should_fail=True)
+
+    pdf1 = tmp_path / "a.pdf"
+    pdf2 = tmp_path / "b.pdf"
+    _write_minimal_pdf(pdf1)
+    _write_minimal_pdf(pdf2)
+
+    raw = RawInput(inn_raw="aspirin")
+    run, packet = orch.run_until_verification(raw, [pdf1, pdf2])
+    assert run.status == RunStatus.failed
+    assert packet is None

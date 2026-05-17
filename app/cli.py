@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,6 +21,22 @@ DISCLAIMER = (
 )
 
 app = typer.Typer(help="pharm-agent MVP 1 — deterministic pharma analysis skeleton")
+
+
+def _setup_debug(debug: bool) -> None:
+    """Configure debug logging and config flag."""
+    if debug:
+        config.debug = True
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+        logging.getLogger("pharm_agent").setLevel(logging.DEBUG)
+        logging.getLogger("httpx").setLevel(logging.INFO)
+        typer.echo("  [DEBUG mode enabled]")
+    else:
+        logging.basicConfig(level=logging.WARNING)
 
 
 def _now_iso() -> str:
@@ -42,6 +59,13 @@ def _print_verification_packet(packet) -> None:  # noqa: ANN001
     if packet.raw_disease:
         typer.echo(f"  Raw Disease: {packet.raw_disease}")
     typer.echo(f"  Completeness: {packet.completeness}")
+
+    if packet.completeness == "low":
+        typer.echo("")
+        typer.echo("  ⚠ WARNING: Completeness is LOW. Critical data is missing.")
+        typer.echo("  The system will ask you to provide clarifications before proceeding.")
+    elif packet.completeness == "medium" and packet.questions:
+        typer.echo("  ℹ Some clarifications may be needed — see questions below.")
 
     typer.echo("\n--- Normalized INN / Нормализованный МНН ---")
     inn = packet.normalized_inn
@@ -103,8 +127,10 @@ def run(
     region: str | None = typer.Option(None, help="Регион: global | US | EU | RU | custom"),
     molecule_type: str | None = typer.Option(None, help="Тип молекулы или формулировки"),
     stage: str | None = typer.Option(None, help="Стадия разработки"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
 ) -> None:
     """Create and execute a new analysis run (end-to-end MVP 1 flow)."""
+    _setup_debug(debug)
     config.ensure_dirs()
     db = Database()
     db.init_schema()
@@ -144,11 +170,18 @@ def run(
 
     _print_section("HUMAN VERIFICATION REQUIRED / ТРЕБУЕТСЯ ВЕРИФИКАЦИЯ")
     typer.echo("  Please review the enrichment summary above.")
-    typer.echo("  Options: [a]pprove / [r]eject")
+
+    if packet and packet.completeness == "low":
+        typer.echo("")
+        typer.echo("  ⚠ Completeness: LOW — critical information is missing.")
+        typer.echo("  The system strongly recommends requesting revision before proceeding.")
+        typer.echo("")
+
+    typer.echo("  Options: [a]pprove / [r]eject / [n]eeds revision")
     typer.echo("")
 
-    choice = typer.prompt("  Your decision (a/r)", default="a").strip().lower()
-    comment = None
+    choice = typer.prompt("  Your decision (a/r/n)", default="a").strip().lower()
+
     if choice in ("r", "reject", "rejected"):
         comment = typer.prompt("  Comment (optional, press Enter to skip)", default="").strip() or None
         decision = HumanDecision(
@@ -163,7 +196,42 @@ def run(
         typer.echo(f"\n{DISCLAIMER}")
         return
 
+    if choice in ("n", "needs_revision", "revision"):
+        typer.echo("\n  Please specify what needs to be corrected:")
+        corrections_raw = typer.prompt("  Corrections (JSON or free text)", default="").strip()
+        comment = typer.prompt("  Comment (optional, press Enter to skip)", default="").strip() or None
+
+        corrections: dict[str, str] = {}
+        if corrections_raw:
+            try:
+                corrections = json.loads(corrections_raw)
+            except json.JSONDecodeError:
+                corrections = {"user_feedback": corrections_raw}
+
+        decision = HumanDecision(
+            run_id=record.run_id,
+            decision="needs_revision",
+            corrections=corrections,
+            comments=comment,
+            timestamp=_now_iso(),
+        )
+        record, _ = orchestrator.finalize_decision(record.run_id, decision)
+        typer.echo(f"\n  Run {record.run_id} sent back for revision.")
+        typer.echo(f"  Status: {record.status.value}")
+        typer.echo("  Re-run the analysis with corrected input when ready.")
+        typer.echo(f"\n{DISCLAIMER}")
+        return
+
     # Approved
+    if packet and packet.completeness == "low":
+        confirm = typer.confirm(
+            "  Completeness is LOW. Are you sure you want to approve?", default=False
+        )
+        if not confirm:
+            typer.echo("  Approval cancelled. Please re-run with option [n]eeds revision.")
+            typer.echo(f"\n{DISCLAIMER}")
+            return
+
     comment = typer.prompt("  Comment (optional, press Enter to skip)", default="").strip() or None
     decision = HumanDecision(
         run_id=record.run_id,
@@ -242,6 +310,61 @@ def status(run_id: str = typer.Option(..., help="Run ID to query")) -> None:
         typer.echo(f"Input hash: {run.input_hash[:16]}...")
     if run.error_message:
         typer.echo(f"Error: {run.error_message}")
+
+
+@app.command()
+def revise(
+    run_id: str = typer.Option(..., help="Run ID in needs_revision status"),
+    inn: str = typer.Option(..., help="Corrected МНН / INN"),
+    disease: str | None = typer.Option(None, help="Corrected disease / indication"),
+    pdf1: Path = typer.Option(..., help="Path to first PDF file"),
+    pdf2: Path = typer.Option(..., help="Path to second PDF file"),
+    region: str | None = typer.Option(None, help="Region"),
+    molecule_type: str | None = typer.Option(None, help="Molecule type"),
+    stage: str | None = typer.Option(None, help="Development stage"),
+) -> None:
+    """Re-run enrichment for a run that was sent back for revision."""
+    config.ensure_dirs()
+    db = Database()
+    db.init_schema()
+
+    pdf1 = pdf1.resolve()
+    pdf2 = pdf2.resolve()
+    for p in (pdf1, pdf2):
+        if not p.exists():
+            typer.echo(f"Error: PDF not found: {p}", err=True)
+            raise typer.Exit(code=1)
+
+    corrected = RawInput(
+        inn_raw=inn,
+        disease_raw=disease,
+        region=region,
+        molecule_type=molecule_type,
+        stage=stage,
+    )
+
+    orchestrator = Orchestrator(db=db)
+
+    try:
+        record, packet = orchestrator.rerun_from_revision(run_id, corrected, [pdf1, pdf2])
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+    if record.status == RunStatus.failed:
+        typer.echo(f"Status: {record.status.value}")
+        if record.error_message:
+            typer.echo(f"Error: {record.error_message}")
+        typer.echo(f"\n{DISCLAIMER}")
+        raise typer.Exit(code=1)
+
+    if packet is not None:
+        _print_verification_packet(packet)
+
+    _print_section("REVISION COMPLETE — VERIFICATION REQUIRED")
+    typer.echo("  Enrichment re-run complete. Please verify the updated results.")
+    typer.echo("  Use the 'run' command flow or 'verify' command to approve/reject.")
+    typer.echo(f"\n{DISCLAIMER}")
 
 
 if __name__ == "__main__":

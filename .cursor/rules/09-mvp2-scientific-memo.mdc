@@ -1,0 +1,70 @@
+---
+description: Rules for generating the scientific memo in Obsidian.
+globs:
+  - "app/obsidian/**/*memo*.py"
+  - "app/obsidian/writer.py"
+  - "vault/04_reports/**/*.md"
+alwaysApply: false
+---
+
+# Scientific Memo Rules
+
+## Purpose
+
+The scientific memo is a human-readable R&D artifact that helps decide whether the INN-disease pair has enough scientific rationale to proceed.
+
+## Required structure
+
+```markdown
+---
+type: scientific_memo
+run_id: ...
+inn: ...
+disease: ...
+status: completed
+created_at: ...
+source_count: ...
+model: ...
+prompt_version: ...
+---
+
+# Scientific Memo: {INN} / {Disease}
+
+## 1. Executive scientific summary
+## 2. Input recap
+## 3. Mechanism of action
+## 4. Disease biology and pathophysiology
+## 5. Mechanistic rationale for this indication
+## 6. Evidence from local PDFs
+## 7. PubMed evidence
+## 8. ClinicalTrials.gov evidence
+## 9. FDA evidence
+## 10. EMA evidence
+## 11. Current standard of care
+## 12. Approved therapies and regulatory status
+## 13. Clinical pipeline
+## 14. Safety and tolerability considerations
+## 15. Unmet medical need
+## 16. Scientific risks
+## 17. Evidence gaps and open questions
+## 18. Source table
+## 19. Disclaimer
+```
+
+## Citation style
+
+```text
+[source: PMID_123456]
+[source: NCT_01234567]
+[source: FDA_NDA_123456]
+[source: PDF_source_1_p12_c03]
+```
+
+## Tone
+
+Precise, cautious R&D language. No hype. No unsupported conclusions.
+Clearly separate: fact, interpretation, hypothesis, missing evidence, next research question.
+
+## Generation
+
+The memo must be generated from validated structured output, not directly from raw LLM text.

@@ -2,22 +2,34 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.agents.intake_enrichment_agent import IntakeEnrichmentAgent
+from app.agents.scientific_agent import ScientificAgent
+from app.connectors.clinicaltrials import ClinicalTrialsConnector
+from app.connectors.ema import EMAConnector
+# from app.connectors.fda import FDAConnector  # FDA недоступен без прокси
+from app.connectors.pubmed import PubMedConnector
+from app.evidence.citations import build_citation_list
+from app.evidence.normalization import compute_connector_coverage, merge_connector_results
+from app.evidence.ranking import rank_evidence
 from app.llm.structured_client import StructuredLLMClient, StructuredOutputError
 from app.logging.audit_logger import log_event
 from app.obsidian import writer as obsidian
 from app.pdf import reader, watcher
+from app.pdf.retrieval import retrieve_pdf_evidence
 from app.schemas.audit import AuditEvent
+from app.schemas.evidence import ConnectorQuery, ConnectorResult
 from app.schemas.human_decision import HumanDecision
 from app.schemas.input import RawInput
 from app.schemas.intake_output import HumanVerificationPacket
 from app.schemas.pdf import PDFExtractionResult, PDFMetadata, PDFVersionStatus
 from app.schemas.run import MVP1Summary, RunRecord, RunStatus, StageOutput
+from app.schemas.scientific import ScientificAgentInput, ScientificAgentOutput
 from app.storage.db import Database
 
 
@@ -175,12 +187,15 @@ class Orchestrator:
         elif decision.decision == "rejected":
             return self._finalize_rejected(run_id)
         else:
+            # needs_revision: record the decision, reset to needs_revision status
             run = self.db.update_run_status(run_id, RunStatus.needs_revision)
-            run = self.db.update_run_status(run_id, RunStatus.input_collected)
+            self._log(run_id, "needs_revision", "state_change", "succeeded",
+                      {"corrections": decision.corrections, "comments": decision.comments})
+            obsidian.write_run_note(run)
             return run, None
 
     def _finalize_approved(self, run_id: str, run: RunRecord) -> tuple[RunRecord, MVP1Summary]:
-        """Write entity notes, build MVP1 summary, and complete the run."""
+        """Write entity notes, build MVP1 summary, run scientific stage, and complete."""
         enrichment = json.loads(run.enrichment_output_json or "{}")
 
         if "normalized_inn" in enrichment:
@@ -192,7 +207,6 @@ class Orchestrator:
             disease = NormalizedDisease.model_validate(enrichment["normalized_disease"])
             obsidian.write_disease_entity_note(disease, run_id)
 
-        # Build final MVP 1 summary
         pdf_versions = self.db.get_pdf_versions_for_run(run_id)
         pdf_hashes = {v["pdf_id"]: v["sha256"] for v in pdf_versions}
         inn_data = enrichment.get("normalized_inn", {})
@@ -216,9 +230,44 @@ class Orchestrator:
         self.db.save_final_summary(run_id, summary_json)
 
         run = self.db.update_run_status(run_id, RunStatus.human_approved)
+        self._log(run_id, "human_approved", "state_change", "succeeded")
+
+        # Register placeholder downstream stages for future pipeline extensions
+        _now = _now_iso()
+        for stage_name in ("scientific_analysis", "market_analysis", "patent_finance_analysis", "synthesis_qa"):
+            self.db.save_stage_output(
+                StageOutput(
+                    stage=f"{stage_name}_placeholder",
+                    run_id=run_id,
+                    output_json=json.dumps({
+                        "status": "not_yet_implemented" if stage_name != "scientific_analysis" else "pending",
+                        "expected_inputs": ["human_approved_normalized_input", "pdf_evidence"],
+                        "expected_outputs": [f"{stage_name}_structured_output"],
+                        "depends_on": "human_approved_intake",
+                    }),
+                    created_at=_now,
+                    metadata={"placeholder": stage_name != "scientific_analysis"},
+                )
+            )
+
+        # MVP2: run scientific analysis stage
+        try:
+            self._run_scientific_stage(run_id, enrichment, pdf_hashes)
+        except (StructuredOutputError, Exception) as exc:
+            run = self.db.update_run_status(run_id, RunStatus.failed, error=str(exc))
+            self._log(run_id, "scientific_analysis", "error", "failed",
+                      {"error": str(exc)})
+            obsidian.write_run_note(run)
+            return run, summary
+
+        # Gate 2 placeholder: in future MVPs, scientific + market conclusions
+        # will be presented to the human for verification before proceeding
+        # to patent/finance analysis. For now, we log and continue.
+        self._log(run_id, "gate_2_placeholder", "state_change", "succeeded",
+                  {"note": "Gate 2 (scientific review before patent/finance) not yet implemented"})
+
         run = self.db.update_run_status(run_id, RunStatus.completed)
         self._log(run_id, "completed", "state_change", "succeeded")
-
         obsidian.write_run_note(run)
         return run, summary
 
@@ -231,10 +280,193 @@ class Orchestrator:
         obsidian.write_run_note(run)
         return run, None
 
+    # ------------------------------------------------------------------
+    # MVP2: Scientific analysis stage
+    # ------------------------------------------------------------------
+
+    def _run_scientific_stage(
+        self,
+        run_id: str,
+        enrichment: dict[str, Any],
+        pdf_hashes: dict[str, str],
+    ) -> ScientificAgentOutput:
+        """Collect evidence from all connectors, rank, call LLM, persist, write memo."""
+        inn_data = enrichment.get("normalized_inn", {})
+        disease_data = enrichment.get("normalized_disease") or {}
+
+        query = ConnectorQuery(
+            inn=inn_data.get("preferred_name", ""),
+            disease=disease_data.get("preferred_name"),
+            synonyms=inn_data.get("synonyms", []),
+            brand_names=inn_data.get("brand_names", []),
+            mesh_terms=disease_data.get("mesh", []),
+            max_results=20,
+        )
+
+        # 1. Collect evidence from all connectors
+        connector_results: list[ConnectorResult] = []
+
+        pdf_outputs = self.db.get_stage_outputs(run_id)
+        pdf_result = retrieve_pdf_evidence(pdf_outputs, query)
+        connector_results.append(pdf_result)
+
+        for ConnectorClass in (PubMedConnector, ClinicalTrialsConnector, EMAConnector):
+            # FDAConnector отключён — API недоступен без прокси
+            try:
+                connector = ConnectorClass()
+                result = connector.search(query, run_id=run_id)
+                connector_results.append(result)
+            except Exception as exc:
+                logging.getLogger("pharm_agent.orchestrator").warning(
+                    "[%s] Connector %s crashed: %s", run_id, ConnectorClass.connector_name, exc,
+                )
+                connector_results.append(ConnectorResult(
+                    connector_name=ConnectorClass.connector_name,
+                    query=query,
+                    errors=[f"{type(exc).__name__}: {exc}"],
+                ))
+
+        # 2. Normalize and rank
+        all_sources, all_evidence = merge_connector_results(connector_results)
+        ranked_evidence = rank_evidence(all_evidence)
+        coverage = compute_connector_coverage(connector_results)
+
+        _log = logging.getLogger("pharm_agent.orchestrator")
+        _log.info(
+            "[%s] Evidence collected: %d sources, %d evidence items. Coverage: %s",
+            run_id, len(all_sources), len(ranked_evidence), coverage,
+        )
+        for cr in connector_results:
+            if cr.errors:
+                _log.warning("[%s] %s errors: %s", run_id, cr.connector_name, cr.errors)
+            if cr.warnings:
+                _log.info("[%s] %s warnings: %s", run_id, cr.connector_name, cr.warnings)
+
+        run = self.db.update_run_status(run_id, RunStatus.scientific_evidence_collected)
+        self._log(run_id, "scientific_evidence_collected", "state_change", "succeeded",
+                  {"sources_count": len(all_sources), "evidence_count": len(ranked_evidence)})
+
+        # 3. Persist sources and evidence
+        for src in all_sources:
+            self.db.save_scientific_source(run_id, src.model_dump(mode="json"))
+        for evi in ranked_evidence:
+            self.db.save_scientific_evidence_item(run_id, evi.model_dump(mode="json"))
+
+        for cr in connector_results:
+            self.db.save_scientific_connector_call({
+                "run_id": run_id,
+                "connector_name": cr.connector_name,
+                "query_json": cr.query.model_dump_json(),
+                "status": "failed" if cr.errors and not cr.sources else ("partial" if cr.errors else "succeeded"),
+                "results_returned": cr.results_returned,
+                "errors": cr.errors,
+                "duration_ms": cr.duration_ms,
+                "timestamp": _now_iso(),
+            })
+
+        # 4. Build scientific agent input
+        agent_input = ScientificAgentInput(
+            run_id=run_id,
+            inn_preferred=inn_data.get("preferred_name", ""),
+            inn_english=inn_data.get("english_inn"),
+            inn_synonyms=inn_data.get("synonyms", []),
+            disease_preferred=disease_data.get("preferred_name"),
+            disease_synonyms=disease_data.get("synonyms", []),
+            region=enrichment.get("region"),
+            pdf_hashes=pdf_hashes,
+            evidence_items_json=json.dumps(
+                [e.model_dump(mode="json") for e in ranked_evidence], ensure_ascii=False
+            ),
+            sources_json=json.dumps(
+                [s.model_dump(mode="json") for s in all_sources], ensure_ascii=False
+            ),
+            connector_coverage=coverage,
+        )
+
+        # 5. Call scientific agent LLM
+        agent = ScientificAgent(client=self._get_llm_client())
+        output = agent.run(agent_input, all_sources, ranked_evidence)
+
+        # 6. Persist scientific output
+        output_json = json.dumps(output.model_dump(mode="json"), ensure_ascii=False)
+        self.db.save_scientific_output(run_id, output_json)
+
+        run = self.db.update_run_status(run_id, RunStatus.scientific_analyzed)
+        self._log(run_id, "scientific_analyzed", "state_change", "succeeded")
+
+        # 7. Write scientific memo and source notes to Obsidian
+        memo_path = obsidian.write_scientific_memo(
+            run_id=run_id,
+            output=output,
+            sources=all_sources,
+            coverage=coverage,
+            pdf_hashes=pdf_hashes,
+        )
+        for src in all_sources:
+            obsidian.write_source_note(src)
+        import hashlib as _hl
+        memo_text = memo_path.read_text(encoding="utf-8")
+        self.db.save_scientific_memo_version(
+            run_id, str(memo_path), _hl.sha256(memo_text.encode()).hexdigest()[:16],
+        )
+
+        return output
+
     # Keep backward-compatible aliases used by existing tests
     def submit_human_decision(self, run_id: str, decision: HumanDecision) -> RunRecord:
         run, _ = self.finalize_decision(run_id, decision)
         return run
+
+    # ------------------------------------------------------------------
+    # Revision re-run
+    # ------------------------------------------------------------------
+
+    def rerun_from_revision(
+        self,
+        run_id: str,
+        corrected_input: RawInput,
+        pdf_paths: list[Path],
+    ) -> tuple[RunRecord, HumanVerificationPacket | None]:
+        """Re-run enrichment after a needs_revision decision.
+
+        Applies corrected input, re-ingests PDFs, re-runs enrichment,
+        and returns the run back to awaiting_human_verification.
+        """
+        run = self.db.get_run(run_id)
+        if run is None:
+            raise ValueError(f"Run {run_id} not found")
+        if run.status != RunStatus.needs_revision:
+            raise ValueError(f"Run not in needs_revision state (status={run.status.value})")
+
+        # Transition back to input_collected
+        run = self.db.update_run_status(run_id, RunStatus.input_collected)
+        self._log(run_id, "revision_restart", "state_change", "succeeded",
+                  {"corrected_input": corrected_input.model_dump(mode="json")})
+
+        # Re-register PDFs
+        pdf_results = self._register_and_ingest_pdfs(run_id, pdf_paths)
+        run = self.db.update_run_status(run_id, RunStatus.pdfs_registered)
+        run = self.db.update_run_status(run_id, RunStatus.pdfs_ingested)
+
+        # Re-run enrichment
+        try:
+            agent = IntakeEnrichmentAgent(client=self._get_llm_client())
+            enrichment = agent.run(corrected_input, pdf_results, run_id=run_id)
+            self.db.save_enrichment_output(run_id, enrichment)
+        except StructuredOutputError as exc:
+            run = self.db.update_run_status(run_id, RunStatus.failed, error=str(exc))
+            self._log(run_id, "intake_enrichment", "error", "failed",
+                      {"error": str(exc), "type": "structured_output"})
+            obsidian.write_run_note(run)
+            return run, None
+
+        run = self.db.update_run_status(run_id, RunStatus.intake_enriched)
+        run = self.db.update_run_status(run_id, RunStatus.awaiting_human_verification)
+        self._log(run_id, "revision_enriched", "state_change", "succeeded")
+
+        obsidian.write_run_note(run)
+        packet = self.build_verification_packet(run_id)
+        return run, packet
 
     # ------------------------------------------------------------------
     # PDF registration

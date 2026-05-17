@@ -1,7 +1,6 @@
 """Tests for CLI with mocked Orchestrator/LLM."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -11,8 +10,7 @@ from typer.testing import CliRunner
 
 from app.cli import app
 from app.orchestrator import Orchestrator
-from app.schemas.human_decision import HumanDecision
-from app.schemas.run import RunStatus
+from app.storage.db import Database
 
 runner = CliRunner()
 
@@ -115,19 +113,16 @@ def test_cli_run_missing_pdf():
     assert "not found" in result.output.lower() or "error" in result.output.lower()
 
 
-def test_cli_run_and_verify(tmp_path, _mock_obsidian):
-    """Full CLI happy path with mocked LLM client."""
+def test_cli_run_approved(tmp_path, _mock_obsidian):
+    """Full CLI happy path: run → inline approve → completed."""
     pdf1 = tmp_path / "a.pdf"
     pdf2 = tmp_path / "b.pdf"
     _write_minimal_pdf(pdf1)
     _write_minimal_pdf(pdf2)
 
-    # Patch Orchestrator to use fake LLM client
     fake_llm = FakeLLMClient()
 
-    with patch("app.cli.Orchestrator") as MockOrchestrator:
-        # Use a fresh temp database so stale schema never interferes
-        from app.storage.db import Database
+    with patch("app.cli.Orchestrator") as mock_orch_cls:
         db_path = tmp_path / "cli_test.sqlite"
 
         def _mock_constructor(*, db):
@@ -135,42 +130,59 @@ def test_cli_run_and_verify(tmp_path, _mock_obsidian):
             test_db.init_schema()
             return Orchestrator(db=test_db, llm_client=fake_llm)
 
-        MockOrchestrator.side_effect = _mock_constructor
+        mock_orch_cls.side_effect = _mock_constructor
 
+        # Simulate user typing "a" (approve) then Enter (empty comment)
         result = runner.invoke(
             app,
             [
                 "run",
-                "--inn",
-                "aspirin",
-                "--disease",
-                "stroke",
-                "--pdf1",
-                str(pdf1),
-                "--pdf2",
-                str(pdf2),
+                "--inn", "aspirin",
+                "--disease", "stroke",
+                "--pdf1", str(pdf1),
+                "--pdf2", str(pdf2),
             ],
+            input="a\n\n",
         )
 
     assert result.exit_code == 0, f"CLI run failed: {result.output}"
     assert "Run created:" in result.output
-    run_id = None
-    for line in result.output.splitlines():
-        if "Run created:" in line:
-            run_id = line.split("Run created:")[1].strip()
-            break
-    assert run_id is not None
+    assert "completed" in result.output.lower()
 
-    # Also mock for verify
-    with patch("app.cli.Orchestrator") as MockOrchestrator:
-        MockOrchestrator.side_effect = _mock_constructor
-        result2 = runner.invoke(
+
+def test_cli_run_rejected(tmp_path, _mock_obsidian):
+    """CLI rejection flow: run → inline reject → completed with rejected."""
+    pdf1 = tmp_path / "a.pdf"
+    pdf2 = tmp_path / "b.pdf"
+    _write_minimal_pdf(pdf1)
+    _write_minimal_pdf(pdf2)
+
+    fake_llm = FakeLLMClient()
+
+    with patch("app.cli.Orchestrator") as mock_orch_cls:
+        db_path = tmp_path / "cli_test.sqlite"
+
+        def _mock_constructor(*, db):
+            test_db = Database(db_path)
+            test_db.init_schema()
+            return Orchestrator(db=test_db, llm_client=fake_llm)
+
+        mock_orch_cls.side_effect = _mock_constructor
+
+        # Simulate user typing "r" (reject) then "not good" (comment)
+        result = runner.invoke(
             app,
-            ["verify", "--run-id", run_id, "--decision", "approved"],
+            [
+                "run",
+                "--inn", "aspirin",
+                "--pdf1", str(pdf1),
+                "--pdf2", str(pdf2),
+            ],
+            input="r\nnot good\n",
         )
 
-    assert result2.exit_code == 0, f"CLI verify failed: {result2.output}"
-    assert "completed" in result2.output
+    assert result.exit_code == 0, f"CLI reject failed: {result.output}"
+    assert "rejected" in result.output.lower()
 
 
 def test_cli_verify_bad_decision():

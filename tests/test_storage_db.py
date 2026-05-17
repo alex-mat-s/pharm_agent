@@ -1,6 +1,8 @@
 """Tests for SQLite storage layer: runs, steps, PDFs, human decisions, structured outputs, audit events."""
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from app.schemas.human_decision import HumanDecision
@@ -198,6 +200,74 @@ def test_pdf_register_updates_last_seen(tmp_db):
     assert fetched is not None
     assert fetched.size_bytes == 2048
     assert fetched.page_count == 12
+
+
+def test_init_schema_migrates_legacy_pdf_files_table(tmp_path):
+    db_path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE pdf_files (
+            sha256 TEXT PRIMARY KEY,
+            pdf_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            page_count INTEGER,
+            modified_timestamp TEXT,
+            ingested_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO pdf_files (
+            sha256, pdf_id, filename, size_bytes, page_count,
+            modified_timestamp, ingested_at, last_seen_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "legacy_hash",
+            "source_1",
+            "legacy.pdf",
+            123,
+            2,
+            "2026-05-11T10:00:00+00:00",
+            "2026-05-11T10:00:00+00:00",
+            "2026-05-11T10:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    db.init_schema()
+
+    fetched = db.get_pdf_by_sha256("legacy_hash")
+    assert fetched is not None
+    assert fetched.pdf_id == "source_1"
+
+    # The migrated table must support the new composite-key upsert target.
+    db.register_pdf(
+        PDFMetadata(
+            pdf_id="source_2",
+            filename="new.pdf",
+            sha256="legacy_hash",
+            size_bytes=456,
+            page_count=3,
+            modified_timestamp="2026-05-12T10:00:00+00:00",
+            ingested_at="2026-05-12T10:00:00+00:00",
+            last_seen_at="2026-05-12T10:00:00+00:00",
+        )
+    )
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT pdf_id, sha256 FROM pdf_files WHERE sha256 = ? ORDER BY pdf_id",
+        ("legacy_hash",),
+    ).fetchall()
+    conn.close()
+    assert rows == [("source_1", "legacy_hash"), ("source_2", "legacy_hash")]
 
 
 # =====================================================================

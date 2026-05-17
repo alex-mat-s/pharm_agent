@@ -57,15 +57,21 @@ def _hash_text(text: str) -> str:
 
 
 def log_event(event: AuditEvent) -> None:
-    """Append a single audit event as one JSONL line.
-
-    Also persists to SQLite when the database layer is accessible.
-    """
+    """Append a single audit event as one JSONL line and mirror to SQLite."""
     config.ensure_dirs()
     audit_path = Path(config.logs_dir) / "audit.jsonl"
     clean = event.model_copy(update={"metadata": _redact(event.metadata)})
     with open(audit_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(clean.model_dump(mode="json"), ensure_ascii=False) + "\n")
+
+    # Mirror to SQLite — best-effort, never breaks the caller.
+    try:
+        from app.storage.db import Database
+
+        db = Database()
+        db.save_audit_event(clean)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

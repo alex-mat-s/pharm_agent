@@ -2,21 +2,20 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
+from app.config import config
+from app.schemas.audit import AuditEvent
 from app.schemas.human_decision import HumanDecision
 from app.schemas.input import RawInput
 from app.schemas.intake_output import IntakeEnrichmentOutput
-from app.schemas.pdf import PDFMetadata, PDFExtractionResult
+from app.schemas.pdf import PDFMetadata
 from app.schemas.run import RunRecord, RunStatus, StageOutput, is_valid_transition
-from app.schemas.audit import AuditEvent
-from app.config import config
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class Database:
@@ -55,6 +54,7 @@ class Database:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     raw_input_json TEXT NOT NULL,
+                    input_hash TEXT,
                     enrichment_output_json TEXT,
                     human_decision_json TEXT,
                     final_summary_json TEXT,
@@ -85,17 +85,19 @@ class Database:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS pdf_files (
-                    sha256 TEXT PRIMARY KEY,
                     pdf_id TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
                     filename TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
                     page_count INTEGER,
                     modified_timestamp TEXT,
                     ingested_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (pdf_id, sha256)
                 )
                 """
             )
+            self._migrate_pdf_files_table(conn)
             # -----------------------------------------------------------------
             # pdf_versions — many-to-many between runs and pdf_files via sha256
             # -----------------------------------------------------------------
@@ -178,21 +180,77 @@ class Database:
             )
             conn.commit()
 
+    def _migrate_pdf_files_table(self, conn: sqlite3.Connection) -> None:
+        """Upgrade legacy pdf_files tables to the composite primary key schema.
+
+        Older databases used `sha256` as the single primary key. That schema
+        breaks when the same physical PDF is attached to both `source_1` and
+        `source_2`, because a later insert overwrites the earlier slot mapping.
+
+        This migration preserves all existing rows and recreates `pdf_files`
+        with the current `(pdf_id, sha256)` primary key.
+        """
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pdf_files'"
+        ).fetchone()
+        if row is None:
+            return
+
+        create_sql = row["sql"] or ""
+        normalized_sql = " ".join(create_sql.lower().split())
+        if "primary key (pdf_id, sha256)" in normalized_sql:
+            return
+
+        if "sha256 text primary key" not in normalized_sql:
+            raise RuntimeError(
+                "Unsupported legacy schema for pdf_files; automatic migration aborted."
+            )
+
+        conn.execute("ALTER TABLE pdf_files RENAME TO pdf_files_legacy")
+        conn.execute(
+            """
+            CREATE TABLE pdf_files (
+                pdf_id TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                page_count INTEGER,
+                modified_timestamp TEXT,
+                ingested_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (pdf_id, sha256)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO pdf_files (
+                pdf_id, sha256, filename, size_bytes, page_count,
+                modified_timestamp, ingested_at, last_seen_at
+            )
+            SELECT
+                pdf_id, sha256, filename, size_bytes, page_count,
+                modified_timestamp, ingested_at, last_seen_at
+            FROM pdf_files_legacy
+            """
+        )
+        conn.execute("DROP TABLE pdf_files_legacy")
+
     # =====================================================================
     # Runs
     # =====================================================================
 
-    def create_run(self, raw_input: RawInput) -> RunRecord:
+    def create_run(self, raw_input: RawInput, input_hash: str = "") -> RunRecord:
         run_id = f"run_{_now_iso().replace(':', '').replace('+', '')}"
         now = _now_iso()
         raw_json = json.dumps(raw_input.model_dump(mode="json"), ensure_ascii=False)
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO runs (run_id, status, created_at, updated_at, raw_input_json)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO runs (run_id, status, created_at, updated_at, raw_input_json, input_hash)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, RunStatus.created.value, now, now, raw_json),
+                (run_id, RunStatus.created.value, now, now, raw_json, input_hash),
             )
             conn.commit()
         return RunRecord(
@@ -201,6 +259,7 @@ class Database:
             created_at=now,
             updated_at=now,
             raw_input_json=raw_json,
+            input_hash=input_hash,
         )
 
     def update_run_status(self, run_id: str, new_status: RunStatus, error: str | None = None) -> RunRecord:
@@ -238,14 +297,16 @@ class Database:
             return self._row_to_run(row)
 
     def _row_to_run(self, row: sqlite3.Row) -> RunRecord:
+        columns = row.keys()
         return RunRecord(
             run_id=row["run_id"],
             status=RunStatus(row["status"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             raw_input_json=row["raw_input_json"],
+            input_hash=row["input_hash"] if "input_hash" in columns else None,
             enrichment_output_json=row["enrichment_output_json"],
-            human_decision_json=None,  # fetched from dedicated table now
+            human_decision_json=None,
             final_summary_json=row["final_summary_json"],
             error_message=row["error_message"],
         )
@@ -413,15 +474,14 @@ class Database:
             )
 
     def register_pdf(self, meta: PDFMetadata) -> None:
-        """Upsert into pdf_files and create a version row."""
+        """Upsert into pdf_files keyed by (pdf_id, sha256)."""
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO pdf_files
-                (sha256, pdf_id, filename, size_bytes, page_count, modified_timestamp, ingested_at, last_seen_at)
+                (pdf_id, sha256, filename, size_bytes, page_count, modified_timestamp, ingested_at, last_seen_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(sha256) DO UPDATE SET
-                    pdf_id=excluded.pdf_id,
+                ON CONFLICT(pdf_id, sha256) DO UPDATE SET
                     filename=excluded.filename,
                     size_bytes=excluded.size_bytes,
                     last_seen_at=excluded.last_seen_at,
@@ -429,8 +489,8 @@ class Database:
                     modified_timestamp=excluded.modified_timestamp
                 """,
                 (
-                    meta.sha256,
                     meta.pdf_id,
+                    meta.sha256,
                     meta.filename,
                     meta.size_bytes,
                     meta.page_count,

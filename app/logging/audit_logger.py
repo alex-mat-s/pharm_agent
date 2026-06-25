@@ -210,11 +210,14 @@ def log_tool_call(
     output_summary: dict[str, Any] | None = None,
     error_message: str | None = None,
     source_hash: str | None = None,
+    endpoint: str | None = None,
 ) -> None:
     """Log an important tool call (PDF hash, extraction, DB write, Obsidian write)."""
     metadata: dict[str, Any] = {
         "tool_name": tool_name,
     }
+    if endpoint is not None:
+        metadata["endpoint"] = endpoint
     if duration_ms is not None:
         metadata["duration_ms"] = duration_ms
     if input_summary is not None:

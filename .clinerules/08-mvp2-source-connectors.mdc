@@ -1,0 +1,56 @@
+---
+description: Rules for PubMed, ClinicalTrials.gov, FDA, and EMA connectors.
+globs:
+  - "app/connectors/**/*.py"
+  - "tests/connectors/**/*.py"
+alwaysApply: false
+---
+
+# Source Connector Rules
+
+## Connector interface
+
+```python
+class Connector:
+    connector_name: str
+    def search(self, query: ConnectorQuery, run_id: str) -> ConnectorResult:
+        ...
+```
+
+All connectors return normalized `ConnectorResult`, not raw HTTP responses.
+
+## PubMed connector
+
+- Query builder using INN, synonyms, disease, MeSH terms
+- ESearch for PMIDs, ESummary/EFetch for metadata
+- Extract: PMID, title, journal, publication date, authors, abstract, article type
+- Configurable max results
+
+## ClinicalTrials.gov connector
+
+- Search by condition, intervention, or combined
+- Extract: NCT ID, title, phase, status, sponsor, conditions, interventions, dates
+- Classify: completed/recruiting/active/terminated/withdrawn/unknown
+- Classify phase: early phase 1 through phase 4, not applicable, unknown
+
+## FDA connector
+
+- Search by active ingredient, brand names, application number
+- Extract: application number, sponsor, product name, dosage form, route, strength, approval status
+
+## EMA connector
+
+- Search by active substance, medicine name, therapeutic area
+- Extract: medicine name, active substance, authorization status, therapeutic area, ATC, EPAR URL
+- Support local caching
+
+## Error handling
+
+Every connector must handle: network timeout, rate limit, HTTP 4xx/5xx, malformed response, empty results, partial data.
+Pipeline may continue with partial evidence if gaps are clearly listed.
+
+## Mandatory sources from pipeline.md
+
+Scientific/clinical: PubMed, ClinicalTrials.gov, FDA, EMA
+Market: FDA/EMA approvals, ClinicalTrials pipeline, WHO ATC/DDD, public reports
+Patents: Orange Book, Purple Book, EPO OPS, USPTO, WIPO/Google Patents/The Lens

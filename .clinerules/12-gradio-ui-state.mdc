@@ -1,0 +1,15 @@
+---
+description: UI state and event patterns for Gradio screens
+globs: app/ui/**/*.py
+alwaysApply: false
+---
+
+# Gradio UI State Rule
+
+- Split the UI into small modules such as `gradio_app.py`, `services.py`, and `view_models.py` instead of one large event file.
+- Keep only ephemeral widget state in Gradio. SQLite, audit logs, and Obsidian notes remain the source of truth.
+- Reflect backend progress with explicit stage labels derived from `RunStatus`; avoid hidden background state.
+- Make approve, reject, and needs-revision separate explicit actions with visible rationale fields.
+- Show sanitized errors with recovery guidance; do not dump raw stack traces into the user-facing UI.
+- Prefer deterministic data transforms in Python helpers over inline lambda-heavy component callbacks.
+- When a screen edits normalized values, keep the original raw values visible for reviewer comparison.

@@ -1,0 +1,45 @@
+---
+description: Market Attractiveness Agent conventions (MVP 3)
+globs: app/agents/market_agent.py,app/schemas/market.py,prompts/market_agent.*.md
+alwaysApply: false
+---
+# Market Agent Rule
+
+## Agent behavior
+
+MarketAgent receives structured input (`MarketAgentInput`) built from scientific stage outputs and evidence. It calls an LLM via `StructuredLLMClient` and returns validated `MarketAgentOutput`.
+
+## Required output fields
+
+Every market analysis must include:
+- `market_summary` — 2-4 sentence executive overview.
+- `patient_population` — at minimum `target_segment` and `segmentation_logic`.
+- `competitors` — top 3-5 if data available, otherwise flag in `missing_information`.
+- `commercial_risks` — at least 2-3 risks or flag in `missing_information`.
+- `confidence` — "low" / "medium" / "high" based on evidence coverage.
+- `sources` — every claim must trace to a `source_id` or be explicit as an assumption.
+
+## Evidence discipline
+
+- Reuse evidence from the scientific stage (stored in `scientific_sources` and `scientific_evidence_items`).
+- Do not hallucinate source IDs. Post-validation removes orphan references.
+- Flag data gaps in `missing_information` and `assumptions`.
+- If pricing data is not available from evidence, state so rather than inventing numbers.
+
+## Orchestration
+
+- Market stage runs after `scientific_analyzed`, before Gate 2.
+- Status transition: `scientific_analyzed` → `market_analyzed` → `completed`.
+- Market output persisted as a `StageOutput` with `stage="market_analysis"`.
+
+## Obsidian memo
+
+- Written to `vault/04_reports/market/{run_id}_market_memo.md`.
+- Uses YAML frontmatter, `AUTO-GENERATED` markers, competitor tables, risk severity icons.
+- Includes the standard R&D disclaimer.
+
+## Prohibited
+
+- Do not present market analysis as investment advice.
+- Do not invent competitor pricing without source support.
+- Do not skip the disclaimer.

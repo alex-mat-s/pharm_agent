@@ -13,6 +13,13 @@ from app.schemas.input import RawInput
 from app.schemas.intake_output import IntakeEnrichmentOutput
 from app.schemas.evidence import ConnectorQuery, ConnectorResult
 from app.schemas.run import RunStatus
+from app.schemas.market import MarketAgentOutput, PatientPopulation
+from app.schemas.patent_finance import (
+    PatentFinanceAgentOutput,
+    InvestmentRange,
+    InvestmentScenario,
+    MoneyTimeline,
+)
 from app.schemas.scientific import ScientificAgentOutput
 from app.storage.db import Database
 
@@ -39,6 +46,28 @@ class FakeStructuredLLMClient:
                 executive_summary="Aspirin is well-studied for stroke.",
                 evidence_gaps=["No novel data"],
                 source_ids_used=["pubmed:12345"],
+                confidence="medium",
+            )
+        if output_model is MarketAgentOutput:
+            return MarketAgentOutput(
+                market_summary="Aspirin market is mature with strong generic competition.",
+                patient_population=PatientPopulation(
+                    global_estimate="~100M stroke patients",
+                    target_segment="Secondary prevention",
+                ),
+                confidence="medium",
+            )
+        if output_model is PatentFinanceAgentOutput:
+            return PatentFinanceAgentOutput(
+                patent_landscape_summary="Aspirin has no active composition patents.",
+                investment_range=InvestmentRange(
+                    low_case=InvestmentScenario(amount_usd="$5M-$10M"),
+                    base_case=InvestmentScenario(amount_usd="$15M-$25M"),
+                    high_case=InvestmentScenario(amount_usd="$30M-$50M"),
+                ),
+                money_timeline=MoneyTimeline(
+                    earliest_value_inflection="Phase 2 completion",
+                ),
                 confidence="medium",
             )
         return self.return_value
@@ -77,10 +106,12 @@ def _empty_connector_result(name: str) -> ConnectorResult:
 @pytest.fixture(autouse=True)
 def _mock_connectors(monkeypatch):
     """Mock all external connectors to return empty results."""
+    # Scientific connectors
     for cls_path in [
         "app.orchestrator.PubMedConnector",
         "app.orchestrator.ClinicalTrialsConnector",
         "app.orchestrator.EMAConnector",
+        "app.orchestrator.FDAConnector",
     ]:
         name = cls_path.split(".")[-1].replace("Connector", "").lower()
         mock_cls = MagicMock()
@@ -89,6 +120,33 @@ def _mock_connectors(monkeypatch):
         mock_cls.return_value = mock_instance
         mock_cls.connector_name = name
         monkeypatch.setattr(cls_path, mock_cls)
+
+    # Patent connectors
+    for cls_path in [
+        "app.orchestrator.OrangeBookConnector",
+        "app.orchestrator.PurpleBookConnector",
+        "app.orchestrator.USPTOConnector",
+    ]:
+        name = cls_path.split(".")[-1].replace("Connector", "").lower()
+        mock_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.search.return_value = _empty_connector_result(name)
+        mock_cls.return_value = mock_instance
+        mock_cls.connector_name = name
+        monkeypatch.setattr(cls_path, mock_cls)
+
+    # Patent aggregator (RU/EA sources)
+    from app.schemas.ru_patent import AggregatedPatentResult, PatentQuery
+    mock_aggregator_cls = MagicMock()
+    mock_aggregator_instance = MagicMock()
+    mock_aggregator_instance.search_all_sources.return_value = AggregatedPatentResult(
+        query=PatentQuery(inn="aspirin"),
+        sources_queried=["rospatent", "fips", "eapo"],
+        sources_available=["rospatent"],
+        sources_unavailable=["fips", "eapo"],
+    )
+    mock_aggregator_cls.return_value = mock_aggregator_instance
+    monkeypatch.setattr("app.orchestrator.PatentAggregator", mock_aggregator_cls)
 
 
 @pytest.fixture
@@ -183,8 +241,8 @@ def test_orchestrator_happy_path(tmp_path, tmp_db):
     )
     run = orch.submit_human_decision(run.run_id, dec)
     assert run.status == RunStatus.completed
-    # MVP2: scientific agent was called after approval
-    assert len(fake_llm.calls) == 2
+    # MVP2 + MVP3 + MVP4: scientific + market + patent_finance agents called after approval
+    assert len(fake_llm.calls) == 4
 
 
 def test_orchestrator_rejected(tmp_path, tmp_db):
@@ -305,12 +363,16 @@ def test_two_phase_approved(tmp_path, tmp_db):
     assert summary.inn_preferred == "aspirin"
     assert summary.human_decision == "approved"
     assert summary.input_hash  # non-empty
-    # MVP2: scientific agent was called
-    assert len(fake_llm.calls) == 2
+    # MVP2 + MVP3 + MVP4: scientific + market + patent_finance agents called
+    assert len(fake_llm.calls) == 4
 
     # Scientific output persisted
     sci_output = tmp_db.get_scientific_output(run.run_id)
     assert sci_output is not None
+
+    # Market output persisted
+    market_output = tmp_db.get_market_output(run.run_id)
+    assert market_output is not None
 
 
 def test_two_phase_rejected(tmp_path, tmp_db):

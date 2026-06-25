@@ -1,0 +1,14 @@
+---
+description: Standards for development prompt templates
+globs: prompts/development/**/*.md
+alwaysApply: false
+---
+
+# Development Prompt Rule
+
+- Files in `prompts/development/` are developer prompt examples for Cursor or ChatGPT, not runtime prompts loaded by the app.
+- Each prompt should state the goal, target files, architectural boundaries, acceptance criteria, and expected verification.
+- Keep prompts concrete: name the modules to reuse such as `app/orchestrator.py`, `app/schemas/*`, `app/storage/db.py`, and `app/obsidian/writer.py`.
+- For UI work, instruct the model to keep business logic out of Gradio callbacks and preserve the mandatory human-verification gate.
+- Ask for incremental delivery: scaffold first, then intake screen, then verification flow, then polish.
+- If a prompt proposes new dependencies or a large refactor, it should require justification before implementation.

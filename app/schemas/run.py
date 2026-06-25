@@ -18,6 +18,10 @@ class RunStatus(str, Enum):
     # MVP2 scientific stage
     scientific_evidence_collected = "scientific_evidence_collected"
     scientific_analyzed = "scientific_analyzed"
+    # MVP3 market stage
+    market_analyzed = "market_analyzed"
+    # MVP4 patent/finance stage
+    patent_finance_analyzed = "patent_finance_analyzed"
     completed = "completed"
     failed = "failed"
 
@@ -47,7 +51,11 @@ TRANSITIONS: dict[RunStatus, list[RunStatus]] = {
         RunStatus.scientific_analyzed,
         RunStatus.failed,
     ],
-    RunStatus.scientific_analyzed: [RunStatus.completed, RunStatus.failed],
+    RunStatus.scientific_analyzed: [RunStatus.market_analyzed, RunStatus.completed, RunStatus.failed],
+    # MVP3 market stage transitions
+    RunStatus.market_analyzed: [RunStatus.patent_finance_analyzed, RunStatus.completed, RunStatus.failed],
+    # MVP4 patent/finance stage transitions
+    RunStatus.patent_finance_analyzed: [RunStatus.completed, RunStatus.failed],
 }
 
 

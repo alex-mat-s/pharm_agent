@@ -1,0 +1,93 @@
+---
+description: Obsidian vault structure and writing rules for the knowledge base.
+globs:
+  - "app/obsidian/**/*.py"
+  - "vault/**/*.md"
+alwaysApply: false
+---
+
+# Obsidian Knowledge Base Rules
+
+## Purpose
+
+The Obsidian vault is the human-readable knowledge layer. It stores:
+- Entity cards (drugs, diseases, companies, targets)
+- Source cards (PDFs, PubMed, ClinicalTrials, FDA, EMA, patents)
+- Run notes
+- Reports (scientific, market, patent/finance, final)
+- Human decision notes
+- Templates
+
+## Vault structure
+
+```text
+vault/
+  00_inputs/
+    {date}_{inn}_{disease}_input.md
+  01_entities/
+    drugs/{slug}.md
+    diseases/{slug}.md
+    companies/{slug}.md
+    targets/{slug}.md
+  02_sources/
+    pdfs/{pdf_id}.md
+    pubmed/PMID_{pmid}.md
+    clinicaltrials/NCT_{nct_id}.md
+    fda/FDA_{application_number}.md
+    ema/EMA_{medicine_slug}.md
+    patents/US{patent_number}.md
+  03_runs/
+    {run_id}.md
+  04_reports/
+    scientific/{run_id}_scientific_memo.md
+    market/{run_id}_market_memo.md
+    patent_finance/{run_id}_patent_finance_memo.md
+    final/{inn}_{disease}_report.md
+  05_decisions/
+    {run_id}_human_verification.md
+  99_templates/
+    drug_template.md
+    disease_template.md
+    patent_template.md
+    run_template.md
+```
+
+## Drug entity card
+
+Must include YAML frontmatter with:
+type, preferred_name, inn_ru, inn_en, synonyms, atc, molecule_type, last_updated, source_runs
+
+Sections: Identity, Mechanism, Approved indications, Known brands, Safety, Patent notes, Linked diseases
+
+## Disease entity card
+
+Must include: type, preferred_name, synonyms, subtypes, mesh, icd, last_updated, source_runs
+
+## Run note
+
+Must include: type, run_id, inn, disease, status, input_hash, pdf_hashes, created_at
+Sections: Input, Status, Intake enrichment, Scientific output, Market output, Patent/finance output, Final synthesis
+
+## Report notes
+
+Every report must include YAML frontmatter: type, run_id, inn, disease, status, created_at, source_count, model, prompt_version
+
+## Linking
+
+Use Obsidian links: drug -> disease, memo -> sources, run -> memos, sources -> runs
+
+## Citation style in memos
+
+```text
+[source: PMID_123456]
+[source: NCT_01234567]
+[source: FDA_NDA_123456]
+[source: EMA_PRODUCT_SLUG]
+[source: PDF_source_1_p12_c03]
+```
+
+## Writing rules
+
+- Do not duplicate full raw API payloads in Obsidian
+- Preserve manual edits below AUTO-GENERATED markers
+- Use stable filenames based on slugified names

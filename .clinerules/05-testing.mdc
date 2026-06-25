@@ -1,0 +1,80 @@
+---
+description: Testing rules for the pharma agent pipeline.
+globs:
+  - "tests/**/*.py"
+  - "app/**/*.py"
+alwaysApply: false
+---
+
+# Testing Rules
+
+## Philosophy
+
+All external dependencies (OpenRouter, PubMed, ClinicalTrials.gov, FDA, EMA) must be testable without live access.
+Use mocked HTTP responses for unit tests.
+
+## MVP 1 test categories
+
+### Schemas
+- RawInput validation and edge cases
+- NormalizedINN, NormalizedDisease validation
+- IntakeEnrichmentOutput completeness
+- HumanDecision variants
+- RunStatus transitions
+
+### PDF handling
+- SHA-256 hash computation
+- New/unchanged/updated detection
+- Text extraction produces correct chunks
+- Missing file handling
+
+### Intake enrichment agent
+- Calls LLM with correct prompts
+- Returns validated IntakeEnrichmentOutput
+- Retries on validation failure
+- Raises StructuredOutputError after retry exhaustion
+
+### Structured LLM client
+- Validates against Pydantic model
+- Repair retry on validation failure
+- Logs all attempts
+
+### Orchestrator
+- Full flow: create -> PDFs -> enrich -> verify -> approve -> complete
+- Rejection flow
+- Needs revision flow
+- Failed enrichment flow
+- Status transitions are valid
+
+### Obsidian writer
+- Run note creation and update
+- Drug and disease entity notes
+- Decision notes
+- PDF source notes
+
+### CLI
+- Command parsing
+- Input validation
+- Human verification interaction
+
+## MVP 2+ test categories
+
+### Connectors (PubMed, ClinicalTrials, FDA, EMA)
+- Correct query building
+- Result parsing
+- Zero results handling
+- HTTP error handling
+- Malformed response handling
+
+### Scientific agent
+- Requires human-approved input
+- Validates structured output
+- Handles partial connector failures
+
+## Golden fixtures
+
+Create fixtures for: known INN/disease pair, test PDFs, mock API responses, valid/invalid agent outputs.
+
+## Coverage priority
+
+Behavior coverage over line coverage. Critical paths: schema validation, evidence normalization, memo writing, failure handling.

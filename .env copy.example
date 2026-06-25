@@ -1,0 +1,54 @@
+# .env.example — copy to .env and fill in
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+DEFAULT_OPENROUTER_MODEL=openai/gpt-4o-mini
+LLM_TIMEOUT_SECONDS=300
+
+# Debug mode: set to true for verbose connector/LLM logging
+DEBUG=false
+
+# Paths
+PDFS_DIR=./pdfs
+VAULT_DIR=./vault
+LOGS_DIR=./logs
+DB_PATH=./runs.sqlite
+
+# Optional: EPO OPS credentials for European patent search
+# Register free at https://developers.epo.org/
+EPO_OPS_CONSUMER_KEY=
+EPO_OPS_CONSUMER_SECRET=
+
+# Optional: USPTO Open Data Portal API key
+# The legacy PatentsView endpoint (api.patentsview.org) is deprecated and returns 301.
+# Register at https://developer.uspto.gov/ for USPTO ODP API access.
+USPTO_ODP_API_KEY=
+
+# FDA connector (openFDA / Drugs@FDA via proxy — optional)
+# If access to api.fda.gov is blocked, set a proxy and/or API key.
+FDA_API_URL=https://api.fda.gov/drug/drugsfda.json
+FDA_PROXY_URL=                    # e.g. http://proxy.company.com:8080
+FDA_API_KEY=                       # openFDA API key if required by proxy
+
+# =============================================================================
+# Russian and Eurasian Patent Sources
+# =============================================================================
+
+# Rospatent Open Data / Open API
+# Register at https://rospatent.gov.ru for API access
+ROSPATENT_BASE_URL=https://searchplatform.rospatent.gov.ru
+ROSPATENT_API_KEY=                 # Optional: API key for extended access
+
+# FIPS (Federal Institute of Industrial Property)
+FIPS_BASE_URL=https://www.fips.ru
+FIPS_REGISTERS_BASE_URL=https://new.fips.ru/registers
+
+# EAPO (Eurasian Patent Organization)
+EAPO_BASE_URL=https://www.eapo.org
+EAPO_REGISTRY_URL=https://www.eapo.org/ru/publications/publicat/register_patent.php
+
+# Patent caching settings
+PATENT_CACHE_ENABLED=true
+PATENT_CACHE_TTL_DAYS=7
+PATENT_CACHE_DIR=./data/cache/patents
+RUSSIAN_PATENT_CACHE_DIR=./data/cache/patents/ru
+EAPO_PATENT_CACHE_DIR=./data/cache/patents/eapo

@@ -1,0 +1,130 @@
+---
+description: Architecture rules for the pharma agent deterministic pipeline.
+globs:
+  - "app/**/*.py"
+  - "tests/**/*.py"
+alwaysApply: true
+---
+
+# Architecture Rules
+
+## Architectural style
+
+Build an orchestrated pipeline, not a group of uncontrolled autonomous agents.
+
+The orchestrator owns:
+- Run creation
+- Stage ordering
+- Stage status transitions
+- Persistence (SQLite, Obsidian, audit log)
+- Human gates
+- Error handling
+
+Agents are pure-ish components that receive explicit inputs and return validated outputs.
+Agents must not directly mutate global state. The orchestrator persists their outputs.
+
+## Full pipeline flow
+
+```text
+1.  Create run
+2.  Collect input: INN/МНН, optional disease, PDF paths, region, molecule type, stage
+3.  Register PDFs and compute hashes
+4.  Detect whether PDFs are new, unchanged, or updated
+5.  Extract initial PDF text/chunks
+6.  Run intake enrichment through OpenRouter structured output
+7.  Save enrichment result
+8.  Present human verification packet (Gate 1)
+9.  Store human decision: approved, rejected, or needs_revision
+10. If approved, create downstream stage records
+11. Run scientific agent (MVP 2) — retrieve evidence, call LLM, validate
+12. Write scientific memo to Obsidian
+13. Human gate 2 — confirm scientific + market direction
+14. Run market agent (MVP 3)
+15. Run patent/finance agent (MVP 4)
+16. Run synthesis + QA agent (MVP 5)
+17. Human gate 3 — review final report
+18. Write final report
+19. Finalize run status
+```
+
+## Stage status model
+
+```text
+created
+input_collected
+pdfs_registered
+pdfs_ingested
+intake_enriched
+awaiting_human_verification
+human_approved
+human_rejected
+needs_revision
+scientific_evidence_collected   (MVP 2)
+scientific_analyzed              (MVP 2)
+market_analyzed                  (MVP 3)
+patent_finance_analyzed          (MVP 4)
+synthesis_completed              (MVP 5)
+completed
+failed
+```
+
+## Human-in-the-loop gates
+
+Three mandatory human gates from pipeline.md:
+
+- **Gate 1** — after intake normalization: verify INN, disease, subtype, region, PDF extraction
+- **Gate 2** — before patent/finance stage: confirm scientific + market conclusions
+- **Gate 3** — before final report: review top conclusions, sources, warnings
+
+## Persistence boundaries
+
+- SQLite: structured run data, PDFs, decisions, stage outputs, audit events
+- JSONL: append-only audit trail
+- Obsidian Markdown: human-readable knowledge notes and reports
+- Do not treat Markdown as the only source of truth
+
+## Structured outputs
+
+Every LLM agent call must request and validate structured output.
+If structured parsing fails: log raw response, log errors, retry once, fail if repair fails.
+
+## OpenRouter abstraction
+
+All OpenRouter calls go through a single wrapper supporting:
+model selection, timeout, retry, structured schema, token/cost metadata, audit logging, secret redaction.
+
+## PDF handling
+
+PDFs are untrusted inputs. Compute SHA-256, store metadata, extract page-level text.
+Detect updates by hash. Future multimodal extraction behind the same PdfReader interface.
+
+## Connector architecture (MVP 2+)
+
+Each connector exposes: `search(query: ConnectorQuery) -> ConnectorResult`.
+All connectors return normalized results, not raw HTTP responses.
+Required connectors: PubMed, ClinicalTrials.gov, FDA, EMA.
+Each connector must handle: timeout, rate limit, HTTP errors, malformed/empty responses.
+
+## Obsidian vault structure
+
+```text
+vault/
+  00_inputs/
+  01_entities/drugs/
+  01_entities/diseases/
+  01_entities/companies/
+  01_entities/targets/
+  02_sources/pdfs/
+  02_sources/pubmed/
+  02_sources/clinicaltrials/
+  02_sources/fda/
+  02_sources/ema/
+  02_sources/patents/
+  03_runs/
+  04_reports/scientific/
+  04_reports/market/
+  04_reports/patent_finance/
+  04_reports/final/
+  05_decisions/
+  99_templates/
+```

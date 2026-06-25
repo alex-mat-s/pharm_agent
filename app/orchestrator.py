@@ -9,11 +9,21 @@ from pathlib import Path
 from typing import Any
 
 from app.agents.intake_enrichment_agent import IntakeEnrichmentAgent
+from app.agents.market_agent import MarketAgent
+from app.agents.patent_finance_agent import PatentFinanceAgent
 from app.agents.scientific_agent import ScientificAgent
+from app.config import config
 from app.connectors.clinicaltrials import ClinicalTrialsConnector
 from app.connectors.ema import EMAConnector
-# from app.connectors.fda import FDAConnector  # FDA недоступен без прокси
+from app.connectors.epo_ops import EPOOPSConnector
+from app.connectors.fda import FDAConnector
+from app.connectors.orange_book import OrangeBookConnector
+from app.connectors.patent_aggregator import PatentAggregator
+from app.connectors.purple_book import PurpleBookConnector
 from app.connectors.pubmed import PubMedConnector
+from app.connectors.uspto import USPTOConnector
+from app.connectors.wipo import WIPOConnector
+from app.schemas.ru_patent import PatentQuery
 from app.evidence.citations import build_citation_list
 from app.evidence.normalization import compute_connector_coverage, merge_connector_results
 from app.evidence.ranking import rank_evidence
@@ -27,6 +37,7 @@ from app.schemas.evidence import ConnectorQuery, ConnectorResult
 from app.schemas.human_decision import HumanDecision
 from app.schemas.input import RawInput
 from app.schemas.intake_output import HumanVerificationPacket
+from app.schemas.market import MarketAgentInput, MarketAgentOutput
 from app.schemas.pdf import PDFExtractionResult, PDFMetadata, PDFVersionStatus
 from app.schemas.run import MVP1Summary, RunRecord, RunStatus, StageOutput
 from app.schemas.scientific import ScientificAgentInput, ScientificAgentOutput
@@ -136,10 +147,10 @@ class Orchestrator:
         run = self.db.update_run_status(run.run_id, RunStatus.pdfs_ingested)
         self._log(run.run_id, "pdfs_ingested", "state_change", "succeeded")
 
-        # 5-6. Intake enrichment
+        # 5-6. Intake enrichment (PDF not used - analyzed in later stages)
         try:
             agent = IntakeEnrichmentAgent(client=self._get_llm_client())
-            enrichment = agent.run(raw_input, pdf_results, run_id=run.run_id)
+            enrichment = agent.run(raw_input, run_id=run.run_id)
             self.db.save_enrichment_output(run.run_id, enrichment)
         except StructuredOutputError as exc:
             run = self.db.update_run_status(run.run_id, RunStatus.failed, error=str(exc))
@@ -251,6 +262,9 @@ class Orchestrator:
             )
 
         # MVP2: run scientific analysis stage
+        logging.getLogger("pharm_agent.orchestrator").info(
+            "[%s] Starting scientific analysis stage...", run_id
+        )
         try:
             self._run_scientific_stage(run_id, enrichment, pdf_hashes)
         except (StructuredOutputError, Exception) as exc:
@@ -260,11 +274,37 @@ class Orchestrator:
             obsidian.write_run_note(run)
             return run, summary
 
+        # MVP3: run market analysis stage
+        logging.getLogger("pharm_agent.orchestrator").info(
+            "[%s] Starting market analysis stage...", run_id
+        )
+        try:
+            self._run_market_stage(run_id, enrichment, pdf_hashes)
+        except (StructuredOutputError, Exception) as exc:
+            run = self.db.update_run_status(run_id, RunStatus.failed, error=str(exc))
+            self._log(run_id, "market_analysis", "error", "failed",
+                      {"error": str(exc)})
+            obsidian.write_run_note(run)
+            return run, summary
+
         # Gate 2 placeholder: in future MVPs, scientific + market conclusions
         # will be presented to the human for verification before proceeding
         # to patent/finance analysis. For now, we log and continue.
         self._log(run_id, "gate_2_placeholder", "state_change", "succeeded",
-                  {"note": "Gate 2 (scientific review before patent/finance) not yet implemented"})
+                  {"note": "Gate 2 (scientific+market review before patent/finance) not yet implemented"})
+
+        # MVP4: run patent/finance analysis stage
+        logging.getLogger("pharm_agent.orchestrator").info(
+            "[%s] Starting patent/finance analysis stage...", run_id
+        )
+        try:
+            self._run_patent_finance_stage(run_id, enrichment, pdf_hashes)
+        except (StructuredOutputError, Exception) as exc:
+            run = self.db.update_run_status(run_id, RunStatus.failed, error=str(exc))
+            self._log(run_id, "patent_finance_analysis", "error", "failed",
+                      {"error": str(exc)})
+            obsidian.write_run_note(run)
+            return run, summary
 
         run = self.db.update_run_status(run_id, RunStatus.completed)
         self._log(run_id, "completed", "state_change", "succeeded")
@@ -310,8 +350,7 @@ class Orchestrator:
         pdf_result = retrieve_pdf_evidence(pdf_outputs, query)
         connector_results.append(pdf_result)
 
-        for ConnectorClass in (PubMedConnector, ClinicalTrialsConnector, EMAConnector):
-            # FDAConnector отключён — API недоступен без прокси
+        for ConnectorClass in (PubMedConnector, ClinicalTrialsConnector, FDAConnector, EMAConnector):
             try:
                 connector = ConnectorClass()
                 result = connector.search(query, run_id=run_id)
@@ -412,6 +451,372 @@ class Orchestrator:
 
         return output
 
+    def _run_market_stage(
+        self,
+        run_id: str,
+        enrichment: dict[str, Any],
+        pdf_hashes: dict[str, str],
+    ) -> MarketAgentOutput:
+        """Run market attractiveness analysis using scientific stage outputs."""
+        inn_data = enrichment.get("normalized_inn", {})
+        disease_data = enrichment.get("normalized_disease") or {}
+
+        # Load scientific output from DB for context
+        scientific_json = self.db.get_scientific_output(run_id)
+        sci_output: dict[str, Any] = {}
+        if scientific_json:
+            import contextlib
+            with contextlib.suppress(json.JSONDecodeError):
+                sci_output = json.loads(scientific_json)
+
+        # Reuse evidence already collected in the scientific stage
+        stored_sources = self.db.get_scientific_sources(run_id)
+        stored_evidence = self.db.get_scientific_evidence_items(run_id)
+
+        from app.schemas.evidence import EvidenceItem, SourceRecord
+        all_sources = [SourceRecord.model_validate(s) for s in stored_sources]
+        all_evidence = []
+        for e_row in stored_evidence:
+            if isinstance(e_row.get("key_findings"), str):
+                e_row["key_findings"] = json.loads(e_row["key_findings"])
+            all_evidence.append(EvidenceItem.model_validate(e_row))
+
+        # Build market agent input
+        approved_therapies_raw = sci_output.get("approved_therapies", [])
+        pipeline_raw = sci_output.get("clinical_trial_landscape", [])
+
+        agent_input = MarketAgentInput(
+            run_id=run_id,
+            inn_preferred=inn_data.get("preferred_name", ""),
+            inn_english=inn_data.get("english_inn"),
+            inn_synonyms=inn_data.get("synonyms", []),
+            disease_preferred=disease_data.get("preferred_name"),
+            disease_synonyms=disease_data.get("synonyms", []),
+            region=enrichment.get("region"),
+            molecule_type=inn_data.get("molecule_type", "unknown"),
+            stage=enrichment.get("stage"),
+            scientific_summary=sci_output.get("executive_summary", ""),
+            approved_therapies_json=json.dumps(approved_therapies_raw, ensure_ascii=False)
+            if approved_therapies_raw else None,
+            clinical_pipeline_json=json.dumps(pipeline_raw, ensure_ascii=False)
+            if pipeline_raw else None,
+            unmet_need=(
+                sci_output.get("unmet_medical_need", {}).get("text")
+                if isinstance(sci_output.get("unmet_medical_need"), dict)
+                else sci_output.get("unmet_medical_need")
+            ),
+            evidence_items_json=json.dumps(
+                [e.model_dump(mode="json") for e in all_evidence], ensure_ascii=False
+            ),
+            sources_json=json.dumps(
+                [s.model_dump(mode="json") for s in all_sources], ensure_ascii=False
+            ),
+            pdf_hashes=pdf_hashes,
+        )
+
+        # Call market agent
+        agent = MarketAgent(client=self._get_llm_client())
+        output = agent.run(agent_input, all_sources, all_evidence)
+
+        # Persist market output
+        output_json = json.dumps(output.model_dump(mode="json"), ensure_ascii=False)
+        self.db.save_stage_output(StageOutput(
+            run_id=run_id,
+            stage="market_analysis",
+            output_json=output_json,
+            status="succeeded",
+            created_at=_now_iso(),
+        ))
+
+        self.db.update_run_status(run_id, RunStatus.market_analyzed)
+        self._log(run_id, "market_analyzed", "state_change", "succeeded")
+
+        # Write market memo to Obsidian
+        memo_path = obsidian.write_market_memo(
+            run_id=run_id,
+            output=output,
+            sources=all_sources,
+            pdf_hashes=pdf_hashes,
+        )
+        self._log(run_id, "market_memo_written", "tool_call", "succeeded",
+                  {"path": str(memo_path)})
+
+        return output
+
+    def _run_patent_finance_stage(
+        self,
+        run_id: str,
+        enrichment: dict[str, Any],
+        pdf_hashes: dict[str, str],
+    ) -> Any:  # PatentFinanceAgentOutput
+        """Run patent/finance analysis using scientific and market stage outputs."""
+        from app.schemas.patent_finance import PatentFinanceAgentInput
+        
+        inn_data = enrichment.get("normalized_inn", {})
+        disease_data = enrichment.get("normalized_disease") or {}
+
+        # Load scientific and market outputs from DB for context
+        scientific_json = self.db.get_scientific_output(run_id)
+        sci_output: dict[str, Any] = {}
+        if scientific_json:
+            import contextlib
+            with contextlib.suppress(json.JSONDecodeError):
+                sci_output = json.loads(scientific_json)
+
+        # Load market output
+        market_stages = [s for s in self.db.get_stage_outputs(run_id) if s.stage == "market_analysis"]
+        market_output: dict[str, Any] = {}
+        if market_stages:
+            with contextlib.suppress(json.JSONDecodeError):
+                market_output = json.loads(market_stages[0].output_json)
+
+        # Reuse evidence from scientific stage
+        stored_sources = self.db.get_scientific_sources(run_id)
+        stored_evidence = self.db.get_scientific_evidence_items(run_id)
+
+        from app.schemas.evidence import EvidenceItem, SourceRecord
+        all_sources = [SourceRecord.model_validate(s) for s in stored_sources]
+        all_evidence = []
+        for e_row in stored_evidence:
+            if isinstance(e_row.get("key_findings"), str):
+                e_row["key_findings"] = json.loads(e_row["key_findings"])
+            all_evidence.append(EvidenceItem.model_validate(e_row))
+
+        # MVP4: Collect patent evidence from patent connectors
+        query = ConnectorQuery(
+            inn=inn_data.get("preferred_name", ""),
+            disease=disease_data.get("preferred_name"),
+            synonyms=inn_data.get("synonyms", []),
+            brand_names=inn_data.get("brand_names", []),
+            max_results=20,
+        )
+
+        _log = logging.getLogger("pharm_agent.orchestrator")
+        _log.info("[%s] Collecting patent evidence...", run_id)
+
+        # ----------------------------------------------------------------
+        # Step 1: Search Russian/Eurasian patent sources via PatentAggregator
+        # ----------------------------------------------------------------
+        _log.info("[%s] Searching Russian and Eurasian patent sources (Rospatent, FIPS, EAPO)...", run_id)
+        
+        ru_patent_query = PatentQuery(
+            inn=inn_data.get("preferred_name", ""),
+            inn_english=inn_data.get("english_inn"),
+            inn_russian=inn_data.get("russian_name"),
+            inn_synonyms=inn_data.get("synonyms", []),
+            brand_names=inn_data.get("brand_names", []),
+            molecular_target=inn_data.get("molecular_target"),
+            indication=disease_data.get("preferred_name"),
+            indication_synonyms=disease_data.get("synonyms", []),
+            max_results=query.max_results,
+        )
+        
+        try:
+            patent_aggregator = PatentAggregator()
+            ru_ea_result = patent_aggregator.search_all_sources(
+                ru_patent_query,
+                run_id=run_id,
+                include_international=True,  # EPO, WIPO
+                include_us=False,  # USPTO handled separately below
+            )
+            
+            # Convert PatentEvidence to SourceRecord and EvidenceItem
+            for patent in ru_ea_result.all_patents:
+                source_record = SourceRecord(
+                    source_id=patent.source_id,
+                    source_type=patent.source_type,
+                    title=patent.title,
+                    publication_date=patent.publication_date,
+                    url_or_path=patent.source_url,
+                    external_id=patent.document_number,
+                    retrieved_at=patent.retrieved_at,
+                    metadata={
+                        "jurisdiction": patent.jurisdiction,
+                        "application_number": patent.application_number,
+                        "filing_date": patent.filing_date,
+                        "grant_date": patent.grant_date,
+                        "legal_status": patent.legal_status.value if patent.legal_status else "unknown",
+                        "applicants": patent.applicants,
+                        "patent_holders": patent.patent_holders,
+                        "ipc_codes": patent.ipc_codes,
+                        "blocking_risk": patent.blocking_risk_preliminary.value if patent.blocking_risk_preliminary else "unknown",
+                    },
+                )
+                all_sources.append(source_record)
+                
+                evidence_item = EvidenceItem(
+                    source_id=patent.source_id,
+                    relevance_score=0.7 if patent.blocking_risk_preliminary.value in ["high", "medium"] else 0.5,
+                    summary=f"{patent.title} ({patent.jurisdiction} {patent.document_number})",
+                    key_findings=[
+                        f"Legal status: {patent.legal_status.value}",
+                        f"Blocking risk: {patent.blocking_risk_preliminary.value}",
+                    ] + (patent.warnings[:3] if patent.warnings else []),
+                )
+                all_evidence.append(evidence_item)
+            
+            # Log RU/EA patent search results per source
+            _log.info(
+                "[%s] RU/EA patent search completed: %d patents found total",
+                run_id, len(ru_ea_result.all_patents),
+            )
+            
+            # Log individual source results
+            if ru_ea_result.rospatent_results:
+                _log.info(
+                    "[%s]   Rospatent: %d patents (available: %s)",
+                    run_id,
+                    ru_ea_result.rospatent_results.results_returned,
+                    ru_ea_result.rospatent_results.source_available,
+                )
+            if ru_ea_result.fips_results:
+                _log.info(
+                    "[%s]   FIPS: %d patents (available: %s)",
+                    run_id,
+                    ru_ea_result.fips_results.results_returned,
+                    ru_ea_result.fips_results.source_available,
+                )
+            if ru_ea_result.eapo_results:
+                _log.info(
+                    "[%s]   EAPO: %d patents (available: %s)",
+                    run_id,
+                    ru_ea_result.eapo_results.results_returned,
+                    ru_ea_result.eapo_results.source_available,
+                )
+            if ru_ea_result.epo_results:
+                _log.info(
+                    "[%s]   EPO OPS: %d patents",
+                    run_id,
+                    ru_ea_result.epo_results.results_returned,
+                )
+            
+            _log.info(
+                "[%s] Sources queried: %s | Available: %s | Unavailable: %s",
+                run_id,
+                ru_ea_result.sources_queried,
+                ru_ea_result.sources_available,
+                ru_ea_result.sources_unavailable,
+            )
+            if ru_ea_result.requires_manual_review:
+                _log.warning(
+                    "[%s] RU/EA patent search requires manual review: %s",
+                    run_id, ru_ea_result.manual_review_reasons,
+                )
+            if ru_ea_result.total_warnings:
+                _log.info("[%s] RU/EA patent warnings: %s", run_id, ru_ea_result.total_warnings[:5])
+                
+        except Exception as exc:
+            _log.warning("[%s] PatentAggregator (RU/EA) failed: %s", run_id, exc)
+            # Continue with international sources
+
+        # ----------------------------------------------------------------
+        # Step 2: Search US-specific patent sources (Orange Book, Purple Book, USPTO)
+        # ----------------------------------------------------------------
+        _log.info("[%s] Searching US patent sources (Orange Book, Purple Book, USPTO)...", run_id)
+        
+        patent_connector_classes = [
+            OrangeBookConnector,
+            PurpleBookConnector,
+            USPTOConnector,
+        ]
+        patent_results: list[ConnectorResult] = []
+        for ConnectorClass in patent_connector_classes:
+            try:
+                connector = ConnectorClass()
+                result = connector.search(query, run_id=run_id)
+                patent_results.append(result)
+            except Exception as exc:
+                _log.warning(
+                    "[%s] Patent connector %s crashed: %s", run_id, ConnectorClass.connector_name, exc,
+                )
+                patent_results.append(ConnectorResult(
+                    connector_name=ConnectorClass.connector_name,
+                    query=query,
+                    errors=[f"{type(exc).__name__}: {exc}"],
+                ))
+
+        # Merge US patent evidence with all evidence
+        patent_sources, patent_evidence = merge_connector_results(patent_results)
+        all_sources.extend(patent_sources)
+        all_evidence.extend(patent_evidence)
+
+        # Log US patent findings
+        for cr in patent_results:
+            if cr.warnings:
+                _log.info("[%s] %s warnings: %s", run_id, cr.connector_name, cr.warnings)
+            _log.info(
+                "[%s] %s returned %d patent sources",
+                run_id, cr.connector_name, cr.results_returned,
+            )
+
+        # Build patent/finance agent input
+        moa_text = sci_output.get("mechanism_of_action", {})
+        if isinstance(moa_text, dict):
+            moa_text = moa_text.get("claim", "")
+
+        # Build PDF context for patent/finance analysis
+        # PDFs may contain patent documents, financial reports, due diligence materials
+        pdf_context = self._build_pdf_context_for_patent_finance(run_id)
+
+        agent_input = PatentFinanceAgentInput(
+            run_id=run_id,
+            inn_preferred=inn_data.get("preferred_name", ""),
+            inn_english=inn_data.get("english_inn"),
+            inn_synonyms=inn_data.get("synonyms", []),
+            disease_preferred=disease_data.get("preferred_name"),
+            disease_synonyms=disease_data.get("synonyms", []),
+            region=enrichment.get("region"),
+            molecule_type=inn_data.get("molecule_type", "unknown"),
+            stage=enrichment.get("stage"),
+            scientific_summary=sci_output.get("executive_summary", ""),
+            mechanism_of_action=moa_text,
+            approved_therapies_json=json.dumps(
+                sci_output.get("approved_therapies", []), ensure_ascii=False
+            ) if sci_output.get("approved_therapies") else None,
+            market_summary=market_output.get("market_summary", ""),
+            competitors_json=json.dumps(
+                market_output.get("competitors", []), ensure_ascii=False
+            ) if market_output.get("competitors") else None,
+            market_size_estimate=market_output.get("market_size_estimate"),
+            evidence_items_json=json.dumps(
+                [e.model_dump(mode="json") for e in all_evidence], ensure_ascii=False
+            ),
+            sources_json=json.dumps(
+                [s.model_dump(mode="json") for s in all_sources], ensure_ascii=False
+            ),
+            pdf_hashes=pdf_hashes,
+            pdf_context=pdf_context,
+        )
+
+        # Call patent/finance agent
+        agent = PatentFinanceAgent(client=self._get_llm_client())
+        output = agent.run(agent_input, all_sources, all_evidence)
+
+        # Persist patent/finance output
+        output_json = json.dumps(output.model_dump(mode="json"), ensure_ascii=False)
+        self.db.save_stage_output(StageOutput(
+            run_id=run_id,
+            stage="patent_finance_analysis",
+            output_json=output_json,
+            status="succeeded",
+            created_at=_now_iso(),
+        ))
+
+        self.db.update_run_status(run_id, RunStatus.patent_finance_analyzed)
+        self._log(run_id, "patent_finance_analyzed", "state_change", "succeeded")
+
+        # Write patent/finance memo to Obsidian
+        memo_path = obsidian.write_patent_finance_memo(
+            run_id=run_id,
+            output=output,
+            sources=all_sources,
+            pdf_hashes=pdf_hashes,
+        )
+        self._log(run_id, "patent_finance_memo_written", "tool_call", "succeeded",
+                  {"path": str(memo_path)})
+
+        return output
+
     # Keep backward-compatible aliases used by existing tests
     def submit_human_decision(self, run_id: str, decision: HumanDecision) -> RunRecord:
         run, _ = self.finalize_decision(run_id, decision)
@@ -448,10 +853,10 @@ class Orchestrator:
         run = self.db.update_run_status(run_id, RunStatus.pdfs_registered)
         run = self.db.update_run_status(run_id, RunStatus.pdfs_ingested)
 
-        # Re-run enrichment
+        # Re-run enrichment (PDF not used - analyzed in later stages)
         try:
             agent = IntakeEnrichmentAgent(client=self._get_llm_client())
-            enrichment = agent.run(corrected_input, pdf_results, run_id=run_id)
+            enrichment = agent.run(corrected_input, run_id=run_id)
             self.db.save_enrichment_output(run_id, enrichment)
         except StructuredOutputError as exc:
             run = self.db.update_run_status(run_id, RunStatus.failed, error=str(exc))
@@ -467,6 +872,61 @@ class Orchestrator:
         obsidian.write_run_note(run)
         packet = self.build_verification_packet(run_id)
         return run, packet
+
+    # ------------------------------------------------------------------
+    # PDF context building for patent/finance analysis
+    # ------------------------------------------------------------------
+
+    def _build_pdf_context_for_patent_finance(self, run_id: str, max_chars: int = 20000) -> str | None:
+        """Build PDF context for patent/finance analysis.
+
+        Extracts text from stored PDF extraction results and formats it
+        for use in the patent/finance agent prompt. PDFs may contain
+        patent documents, financial reports, due diligence materials,
+        market research, or technical documentation.
+
+        Args:
+            run_id: The run ID to load PDF extractions for.
+            max_chars: Maximum total characters to include (to avoid prompt overflow).
+
+        Returns:
+            Formatted PDF context string or None if no PDFs available.
+        """
+        stage_outputs = self.db.get_stage_outputs(run_id)
+        pdf_extractions = [
+            s for s in stage_outputs if s.stage == "pdf_extraction"
+        ]
+
+        if not pdf_extractions:
+            return None
+
+        lines: list[str] = []
+        total_chars = 0
+
+        for stage_out in pdf_extractions:
+            extraction = PDFExtractionResult.model_validate_json(stage_out.output_json)
+            lines.append(f"\n=== PDF: {extraction.pdf_id} ({extraction.page_count} pages, sha256={extraction.sha256[:12]}...) ===\n")
+
+            for chunk in extraction.chunks:
+                # Limit per-page text to avoid overwhelming the context
+                page_text = chunk.text[:2000] if len(chunk.text) > 2000 else chunk.text
+                page_header = f"[Page {chunk.page_number}]\n"
+                page_content = page_header + page_text.strip()
+
+                if total_chars + len(page_content) > max_chars:
+                    lines.append(f"\n... (truncated at {max_chars} chars total) ...")
+                    break
+
+                lines.append(page_content)
+                total_chars += len(page_content)
+
+            if total_chars >= max_chars:
+                break
+
+        if not lines:
+            return None
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # PDF registration

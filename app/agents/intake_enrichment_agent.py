@@ -7,7 +7,6 @@ from app.config import config
 from app.llm.structured_client import StructuredLLMClient, StructuredOutputError
 from app.schemas.input import RawInput
 from app.schemas.intake_output import IntakeEnrichmentOutput
-from app.schemas.pdf import PDFExtractionResult
 
 
 _PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
@@ -18,24 +17,18 @@ def _load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _build_pdf_context(results: list[PDFExtractionResult]) -> str:
-    """Summarize PDF chunks for the prompt."""
-    lines = []
-    for result in results:
-        lines.append(f"PDF: {result.pdf_id} ({result.page_count} pages, sha256={result.sha256})")
-        for chunk in result.chunks:
-            preview = chunk.text[:300].replace("\n", " ")
-            lines.append(f"  Page {chunk.page_number}: {preview}...")
-    return "\n".join(lines)
-
-
 def _build_schema() -> dict[str, Any]:
     """Build a JSON Schema dict from the IntakeEnrichmentOutput model."""
     return IntakeEnrichmentOutput.model_json_schema()
 
 
 class IntakeEnrichmentAgent:
-    """Intake enrichment agent using StructuredLLMClient for guaranteed validation."""
+    """Intake enrichment agent using StructuredLLMClient for guaranteed validation.
+
+    Note: PDF documents are NOT used in intake enrichment as they don't contribute
+    to INN/disease normalization. PDFs are analyzed in later stages (scientific,
+    patent/finance) where their content is more relevant.
+    """
 
     def __init__(self, client: StructuredLLMClient | None = None) -> None:
         self.client = client or StructuredLLMClient()
@@ -43,10 +36,16 @@ class IntakeEnrichmentAgent:
     def run(
         self,
         raw_input: RawInput,
-        pdf_results: list[PDFExtractionResult],
         run_id: str,
     ) -> IntakeEnrichmentOutput:
         """Run intake enrichment and return validated structured output.
+
+        Args:
+            raw_input: Raw input with INN and optional disease/region/stage.
+            run_id: Unique identifier for the current pipeline run.
+
+        Returns:
+            Validated IntakeEnrichmentOutput with normalized INN and disease.
 
         Raises:
             StructuredOutputError: if validation fails even after repair retry.
@@ -54,14 +53,12 @@ class IntakeEnrichmentAgent:
         system_prompt = _load_prompt("system")
         user_template = _load_prompt("user")
 
-        pdf_context = _build_pdf_context(pdf_results)
         user_prompt = user_template.format(
             inn_raw=raw_input.inn_raw,
             disease_raw=raw_input.disease_raw or "N/A",
             region=raw_input.region or "N/A",
             molecule_type=raw_input.molecule_type or "N/A",
             stage=raw_input.stage or "N/A",
-            pdf_context=pdf_context,
         )
 
         result = self.client.call(

@@ -824,3 +824,79 @@ class Database:
                 (run_id,),
             ).fetchone()
             return row["output_json"] if row else None
+
+    def get_patent_finance_output(self, run_id: str) -> str | None:
+        """Load patent/finance analysis JSON from stage_outputs."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT output_json FROM stage_outputs WHERE run_id = ? AND stage = 'patent_finance_analysis' "
+                "ORDER BY id DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            return row["output_json"] if row else None
+
+    # =====================================================================
+    # MVP5: Synthesis / Final Assessment
+    # =====================================================================
+
+    def save_synthesis_output(self, run_id: str, output_json: str) -> None:
+        """Save final synthesis output to structured_outputs and stage_outputs."""
+        now = _now_iso()
+        with self._connect() as conn:
+            # Save to stage_outputs for consistency
+            conn.execute(
+                """
+                INSERT INTO stage_outputs (stage, run_id, output_json, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "synthesis",
+                    run_id,
+                    output_json,
+                    now,
+                    json.dumps({"source": "synthesis_agent"}),
+                ),
+            )
+            # Save to structured_outputs for schema tracking
+            conn.execute(
+                """
+                INSERT INTO structured_outputs
+                (run_id, stage, output_json, schema_name, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    "synthesis",
+                    output_json,
+                    "FinalSynthesisOutput",
+                    now,
+                    json.dumps({"source": "synthesis_agent"}),
+                ),
+            )
+            conn.commit()
+
+    def get_synthesis_output(self, run_id: str) -> str | None:
+        """Load synthesis output JSON from stage_outputs."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT output_json FROM stage_outputs WHERE run_id = ? AND stage = 'synthesis' "
+                "ORDER BY id DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            return row["output_json"] if row else None
+
+    def save_synthesis_report_path(self, run_id: str, report_path: str) -> None:
+        """Save the path to the final synthesis report."""
+        now = _now_iso()
+        with self._connect() as conn:
+            # Update final_summary_json on runs table with report path
+            conn.execute(
+                """
+                UPDATE runs SET final_summary_json = ? WHERE run_id = ?
+                """,
+                (
+                    json.dumps({"report_path": report_path, "generated_at": now}),
+                    run_id,
+                ),
+            )
+            conn.commit()

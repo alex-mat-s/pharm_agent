@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from typing import Any
@@ -10,6 +11,18 @@ import httpx
 from app.config import config
 from app.schemas.audit import AuditEvent
 from app.logging.audit_logger import log_event
+
+logger = logging.getLogger("pharm_agent.openrouter_client")
+
+# Network-level errors that warrant an automatic retry
+_RETRYABLE_ERRORS: tuple[type[Exception], ...] = (
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
 
 
 class OpenRouterClient:
@@ -85,40 +98,66 @@ class OpenRouterClient:
                 },
             }
 
-        start_time = time.time()
-        event_id = str(uuid.uuid4())
-        try:
-            log_event(
-                AuditEvent(
-                    event_id=event_id,
-                    run_id=run_id,
-                    stage="openrouter",
-                    event_type="llm_call",
-                    timestamp=_now_iso(),
-                    status="started",
-                    metadata={
-                        "model": model,
-                        "has_schema": response_schema is not None,
-                        "schema_name": schema_name if response_schema else None,
-                        "system_prompt_hash": _hash(system_prompt),
-                        "user_prompt_hash": _hash(user_prompt),
-                    },
-                )
-            )
-            resp = self._ensure_client().post(
-                f"{self.base_url}/chat/completions", json=payload
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        max_retries = 3
+        retry_delay = 5.0
+        last_exc: Exception | None = None
 
-            # Extract content from response
-            raw_content = data["choices"][0]["message"]["content"]
+        log_event(
+            AuditEvent(
+                event_id=str(uuid.uuid4()),
+                run_id=run_id,
+                stage="openrouter",
+                event_type="llm_call",
+                timestamp=_now_iso(),
+                status="started",
+                metadata={
+                    "model": model,
+                    "has_schema": response_schema is not None,
+                    "schema_name": schema_name if response_schema else None,
+                    "system_prompt_hash": _hash(system_prompt),
+                    "user_prompt_hash": _hash(user_prompt),
+                },
+            )
+        )
 
-            # Parse JSON — this is the critical validation boundary
+        for attempt in range(1, max_retries + 1):
+            start_time = time.time()
             try:
-                parsed = json.loads(raw_content)
-            except json.JSONDecodeError as parse_exc:
-                # Return the raw string so the structured client can retry
+                resp = self._ensure_client().post(
+                    f"{self.base_url}/chat/completions", json=payload
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+                # Extract content from response
+                raw_content = data["choices"][0]["message"]["content"]
+
+                # Parse JSON — this is the critical validation boundary
+                try:
+                    parsed = json.loads(raw_content)
+                except json.JSONDecodeError as parse_exc:
+                    # Return the raw string so the structured client can retry
+                    log_event(
+                        AuditEvent(
+                            event_id=str(uuid.uuid4()),
+                            run_id=run_id,
+                            stage="openrouter",
+                            event_type="llm_call",
+                            timestamp=_now_iso(),
+                            status="succeeded",
+                            metadata={
+                                "model": model,
+                                "latency_ms": int((time.time() - start_time) * 1000),
+                                "parse_error": str(parse_exc),
+                                "response_hash": _hash(raw_content),
+                            },
+                        )
+                    )
+                    return {"_raw_response": raw_content, "_parse_error": True}
+
+                parsed["_raw_response"] = raw_content
+                latency_ms = int((time.time() - start_time) * 1000)
+                usage = data.get("usage", {})
                 log_event(
                     AuditEvent(
                         event_id=str(uuid.uuid4()),
@@ -129,70 +168,146 @@ class OpenRouterClient:
                         status="succeeded",
                         metadata={
                             "model": model,
-                            "latency_ms": int((time.time() - start_time) * 1000),
-                            "parse_error": str(parse_exc),
+                            "latency_ms": latency_ms,
+                            "input_tokens": usage.get("prompt_tokens"),
+                            "output_tokens": usage.get("completion_tokens"),
                             "response_hash": _hash(raw_content),
+                            "attempt": attempt,
                         },
                     )
                 )
-                return {"_raw_response": raw_content, "_parse_error": True}
+                return parsed
 
-            parsed["_raw_response"] = raw_content
-            latency_ms = int((time.time() - start_time) * 1000)
-            usage = data.get("usage", {})
-            log_event(
-                AuditEvent(
-                    event_id=str(uuid.uuid4()),
-                    run_id=run_id,
-                    stage="openrouter",
-                    event_type="llm_call",
-                    timestamp=_now_iso(),
-                    status="succeeded",
-                    metadata={
-                        "model": model,
-                        "latency_ms": latency_ms,
-                        "input_tokens": usage.get("prompt_tokens"),
-                        "output_tokens": usage.get("completion_tokens"),
-                        "response_hash": _hash(raw_content),
-                    },
+            except _RETRYABLE_ERRORS as exc:
+                latency_ms = int((time.time() - start_time) * 1000)
+                last_exc = exc
+                if attempt < max_retries:
+                    wait = retry_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Network error on attempt %d/%d (run=%s): %s: %s. "
+                        "Retrying in %.1fs...",
+                        attempt, max_retries, run_id,
+                        type(exc).__name__, exc, wait,
+                    )
+                    log_event(
+                        AuditEvent(
+                            event_id=str(uuid.uuid4()),
+                            run_id=run_id,
+                            stage="openrouter",
+                            event_type="llm_call",
+                            timestamp=_now_iso(),
+                            status="retrying",
+                            metadata={
+                                "model": model,
+                                "attempt": attempt,
+                                "error": type(exc).__name__,
+                                "error_message": str(exc)[:300],
+                                "latency_ms": latency_ms,
+                                "retry_delay_s": wait,
+                            },
+                        )
+                    )
+                    # Close stale connection before retry
+                    self.close()
+                    time.sleep(wait)
+                    continue
+                else:
+                    logger.error(
+                        "Network error after %d retries (run=%s): %s: %s",
+                        max_retries, run_id, type(exc).__name__, exc,
+                    )
+                    log_event(
+                        AuditEvent(
+                            event_id=str(uuid.uuid4()),
+                            run_id=run_id,
+                            stage="openrouter",
+                            event_type="llm_call",
+                            timestamp=_now_iso(),
+                            status="failed",
+                            metadata={
+                                "model": model,
+                                "attempt": attempt,
+                                "error": type(exc).__name__,
+                                "error_message": str(exc)[:500],
+                                "latency_ms": latency_ms,
+                            },
+                        )
+                    )
+                    raise OpenRouterError(
+                        f"OpenRouter network error after {max_retries} retries: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+
+            except httpx.HTTPStatusError as exc:
+                latency_ms = int((time.time() - start_time) * 1000)
+                # Retry on 429 (rate limit) and 5xx server errors
+                if exc.response.status_code in (429, 502, 503, 504) and attempt < max_retries:
+                    wait = retry_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        "HTTP %d on attempt %d/%d (run=%s). Retrying in %.1fs...",
+                        exc.response.status_code, attempt, max_retries, run_id, wait,
+                    )
+                    log_event(
+                        AuditEvent(
+                            event_id=str(uuid.uuid4()),
+                            run_id=run_id,
+                            stage="openrouter",
+                            event_type="llm_call",
+                            timestamp=_now_iso(),
+                            status="retrying",
+                            metadata={
+                                "model": model,
+                                "attempt": attempt,
+                                "status_code": exc.response.status_code,
+                                "latency_ms": latency_ms,
+                            },
+                        )
+                    )
+                    time.sleep(wait)
+                    continue
+
+                log_event(
+                    AuditEvent(
+                        event_id=str(uuid.uuid4()),
+                        run_id=run_id,
+                        stage="openrouter",
+                        event_type="llm_call",
+                        timestamp=_now_iso(),
+                        status="failed",
+                        metadata={
+                            "model": model,
+                            "status_code": exc.response.status_code,
+                            "error": "http_status_error",
+                            "error_message": str(exc),
+                            "attempt": attempt,
+                        },
+                    )
                 )
-            )
-            return parsed
-        except httpx.HTTPStatusError as exc:
-            log_event(
-                AuditEvent(
-                    event_id=str(uuid.uuid4()),
-                    run_id=run_id,
-                    stage="openrouter",
-                    event_type="llm_call",
-                    timestamp=_now_iso(),
-                    status="failed",
-                    metadata={
-                        "model": model,
-                        "status_code": exc.response.status_code,
-                        "error": "http_status_error",
-                        "error_message": str(exc),
-                    },
+                raise OpenRouterError(f"OpenRouter HTTP error {exc.response.status_code}: {exc}") from exc
+
+            except Exception as exc:
+                log_event(
+                    AuditEvent(
+                        event_id=str(uuid.uuid4()),
+                        run_id=run_id,
+                        stage="openrouter",
+                        event_type="llm_call",
+                        timestamp=_now_iso(),
+                        status="failed",
+                        metadata={
+                            "model": model,
+                            "error": type(exc).__name__,
+                            "error_message": str(exc),
+                            "attempt": attempt,
+                        },
+                    )
                 )
-            )
-            raise OpenRouterError(f"OpenRouter HTTP error {exc.response.status_code}: {exc}") from exc
-        except Exception as exc:
-            log_event(
-                AuditEvent(
-                    event_id=str(uuid.uuid4()),
-                    run_id=run_id,
-                    stage="openrouter",
-                    event_type="llm_call",
-                    timestamp=_now_iso(),
-                    status="failed",
-                    metadata={
-                        "model": model,
-                        "error": type(exc).__name__,
-                        "error_message": str(exc),
-                    },
-                )
-            )
-            raise OpenRouterError(f"OpenRouter request failed: {exc}") from exc
+                raise OpenRouterError(f"OpenRouter request failed: {exc}") from exc
+
+        # Should not reach here, but safety net
+        raise OpenRouterError(
+            f"OpenRouter request failed after {max_retries} retries"
+        ) from last_exc
 
     def close(self) -> None:
         if self.client is not None and not self.client.is_closed:

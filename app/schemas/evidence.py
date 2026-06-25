@@ -12,6 +12,18 @@ class SourceType(str, Enum):
     fda = "fda"
     ema = "ema"
     local_pdf = "local_pdf"
+    orange_book = "orange_book"
+    purple_book = "purple_book"
+    epo_ops = "epo_ops"
+    uspto = "uspto"
+    wipo = "wipo"
+    # Russian and Eurasian patent sources
+    rospatent = "rospatent"
+    fips = "fips"
+    fips_registers = "fips_registers"
+    eapo = "eapo"
+    eapo_bulletin = "eapo_bulletin"
+    google_patents = "google_patents"
 
 
 class ConnectorQuery(BaseModel):
@@ -55,6 +67,8 @@ class EvidenceCategory(str, Enum):
     epidemiology = "epidemiology"
     review = "review"
     guideline = "guideline"
+    patent = "patent"
+    competitive_landscape = "competitive_landscape"
     other = "other"
 
 

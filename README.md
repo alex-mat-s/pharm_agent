@@ -6,7 +6,7 @@
 
 Система принимает на вход МНН (международное непатентованное наименование) и заболевание, проводит нормализацию и обогащение данных через LLM, запрашивает верификацию у человека, а затем последовательно выполняет научный, рыночный, патентно-финансовый анализ и генерирует итоговый отчёт.
 
-**Текущий статус:** реализованы MVP 1 (intake enrichment + human verification), MVP 2 (scientific agent с коннекторами PubMed, ClinicalTrials.gov, FDA, EMA) и MVP 3 (market attractiveness agent).
+**Текущий статус:** реализованы MVP 1 (intake enrichment + human verification), MVP 2 (scientific agent с коннекторами PubMed, ClinicalTrials.gov, FDA, EMA), MVP 3 (market attractiveness agent), MVP 4 (patent/finance agent с российскими и международными патентными источниками) и MVP 5 (synthesis agent + итоговый отчёт).
 
 ## Быстрый старт
 
@@ -43,6 +43,14 @@ DEFAULT_OPENROUTER_MODEL=openai/gpt-4o-mini
 | `VAULT_DIR` | `./vault` | Obsidian-хранилище заметок |
 | `LOGS_DIR` | `./logs` | JSONL audit-логи |
 | `DB_PATH` | `./runs.sqlite` | SQLite база данных |
+
+Опциональные настройки FDA connector (если прямой доступ к api.fda.gov заблокирован):
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `FDA_API_URL` | `https://api.fda.gov/drug/drugsfda.json` | URL openFDA API |
+| `FDA_PROXY_URL` | — | HTTP/HTTPS прокси для всех FDA API (FDA, Orange Book, Purple Book) |
+| `FDA_API_KEY` | — | API-ключ openFDA (если требуется прокси или rate limit) |
 
 ### 3. Подготовка PDF
 
@@ -175,6 +183,41 @@ python -m app.ui.gradio_app
 .venv/bin/python -m app.cli status --run-id <RUN_ID>
 ```
 
+### Итоговый синтез (MVP 5)
+
+После завершения всех предыдущих стадий (научный, рыночный, патентно-финансовый анализ) можно запустить итоговый синтез:
+
+```bash
+.venv/bin/python -m app.cli synthesize --run-id <RUN_ID>
+```
+
+Synthesis Agent интегрирует выходы всех предыдущих агентов в единый структурированный отчёт, который отвечает на вопросы:
+
+- Научно обоснована ли возможность? (scientific rationale)
+- Коммерчески привлекательна ли она? (commercial attractiveness)
+- Финансово жизнеспособна ли она? (financial viability)
+- Есть ли патентные/FTO риски? (patent risks)
+- Какие доказательства поддерживают выводы?
+- Какие допущения остаются непроверенными?
+- Какие противоречия существуют между предыдущими стадиями?
+- Какой объём инвестиций может потребоваться?
+- Когда возможна монетизация?
+- Что должны проверить эксперты?
+
+**Требования для запуска синтеза:**
+- Human verification должна быть одобрена
+- Scientific Agent должен быть выполнен
+- Market Agent должен быть выполнен
+- Patent/Finance Agent должен быть выполнен
+
+**Выходные файлы:**
+- `vault/04_reports/final/{run_id}_final_assessment.md` — итоговый Markdown-отчёт
+- SQLite: структурированный `FinalSynthesisOutput` в таблице `stage_outputs`
+- Audit log: события `synthesis_started`, `synthesis_completed`, и т.д.
+
+**Ограничения:**
+Итоговый синтез — это AI-ассистированный аналитический отчёт для бенчмаркинга и принятия решений. Он не является медицинским советом, юридическим патентным/FTO-заключением, финансовым советом или руководством по регуляторному одобрению. Патентные выводы требуют проверки квалифицированным патентным поверенным. Инвестиционные оценки являются сценарными и должны быть валидированы доменными экспертами.
+
 ## Архитектура
 
 ```
@@ -243,8 +286,8 @@ created → input_collected → pdfs_registered → pdfs_ingested → intake_enr
 | **MVP 1** | Intake enrichment + human verification | ✅ Реализован |
 | **MVP 2** | Scientific agent (PubMed, ClinicalTrials, FDA, EMA) | ✅ Реализован |
 | **MVP 3** | Market attractiveness agent | ✅ Реализован |
-| **MVP 4** | Patent + financial viability agent | 🔲 Запланирован |
-| **MVP 5** | Synthesis + QA + final report | 🔲 Запланирован |
+| **MVP 4** | Patent + financial viability agent | ✅ Реализован (RU/EA + международные патентные коннекторы) |
+| **MVP 5** | Synthesis + QA + final report | ✅ Реализован |
 
 ## Тесты
 

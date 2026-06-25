@@ -144,6 +144,13 @@ class MarketAgent:
         for src in output.sources:
             all_referenced.add(src.source_id)
 
+        # Collect source_ids from price sensitivity analysis
+        if output.price_sensitivity_analysis:
+            psa = output.price_sensitivity_analysis
+            all_referenced.update(psa.source_ids)
+            for scenario in psa.scenarios:
+                all_referenced.update(scenario.source_ids)
+
         orphan_ids = all_referenced - known_ids - {""}
         if orphan_ids:
             output.missing_information.append(
@@ -155,3 +162,13 @@ class MarketAgent:
 
         if not output.commercial_risks:
             output.missing_information.append("No commercial risks identified — review needed.")
+
+        # Validate price sensitivity analysis completeness
+        if not output.price_sensitivity_analysis:
+            output.missing_information.append(
+                "Price sensitivity analysis not provided — unable to assess premium pricing viability."
+            )
+        elif not output.price_sensitivity_analysis.scenarios:
+            output.missing_information.append(
+                "Price sensitivity scenarios not provided — pricing strategy analysis incomplete."
+            )

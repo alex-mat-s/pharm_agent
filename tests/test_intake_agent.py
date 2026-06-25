@@ -10,7 +10,6 @@ import pytest
 from app.agents.intake_enrichment_agent import IntakeEnrichmentAgent
 from app.schemas.input import RawInput
 from app.schemas.intake_output import IntakeEnrichmentOutput
-from app.schemas.pdf import PDFExtractionResult, PDFChunk
 
 
 @pytest.fixture(autouse=True)
@@ -42,20 +41,13 @@ class FakeStructuredLLMClient:
 
 
 def test_intake_agent_runs_pipeline():
+    """Test that intake agent runs without PDF context (PDFs analyzed in later stages)."""
     fake_client = FakeStructuredLLMClient()
     agent = IntakeEnrichmentAgent(client=fake_client)
 
     raw_input = RawInput(inn_raw="ацетилсалициловая кислота", disease_raw="инсульт")
-    pdf_results = [
-        PDFExtractionResult(
-            pdf_id="source_1",
-            sha256="abc123",
-            page_count=10,
-            chunks=[PDFChunk(pdf_id="source_1", page_number=1, text="Некоторый текст о лекарстве", char_count=27)],
-        )
-    ]
 
-    result = agent.run(raw_input, pdf_results, run_id="run_001")
+    result = agent.run(raw_input, run_id="run_001")
 
     assert isinstance(result, IntakeEnrichmentOutput)
     assert result.normalized_inn.preferred_name == "aspirin"
@@ -68,42 +60,54 @@ def test_intake_agent_runs_pipeline():
 
 
 def test_intake_agent_with_prompts_content():
+    """Test that user prompt contains raw input data but no PDF context."""
     fake_client = FakeStructuredLLMClient()
     agent = IntakeEnrichmentAgent(client=fake_client)
 
     raw_input = RawInput(inn_raw="ацетилсалициловая кислота")
-    pdf_results = [
-        PDFExtractionResult(
-            pdf_id="source_1",
-            sha256="abc123",
-            page_count=10,
-            chunks=[PDFChunk(pdf_id="source_1", page_number=1, text="Некоторый текст", char_count=16)],
-        )
-    ]
 
-    agent.run(raw_input, pdf_results, run_id="run_002")
+    agent.run(raw_input, run_id="run_002")
 
     call = fake_client.calls[0]
     user_prompt = call["user_prompt"]
     # Verify the user prompt contains the input data
     assert "ацетилсалициловая кислота" in user_prompt
     assert "N/A" in user_prompt  # disease is optional, so N/A is used
-    assert "abc123" in user_prompt
+    # Verify NO PDF context is included (PDFs are analyzed in later stages)
+    assert "<pdf_evidence>" not in user_prompt
+    assert "sha256" not in user_prompt
 
 
 def test_intake_agent_completion_check():
+    """Test that completeness flag is returned correctly."""
     fake_client = FakeStructuredLLMClient()
     agent = IntakeEnrichmentAgent(client=fake_client)
 
     raw_input = RawInput(inn_raw="аспирин")
-    pdf_results = [
-        PDFExtractionResult(
-            pdf_id="source_1",
-            sha256="abc123",
-            page_count=10,
-            chunks=[PDFChunk(pdf_id="source_1", page_number=1, text="Некоторый текст", char_count=16)],
-        )
-    ]
 
-    result = agent.run(raw_input, pdf_results, run_id="run_003")
+    result = agent.run(raw_input, run_id="run_003")
     assert result.completeness == "high"
+
+
+def test_intake_agent_with_all_optional_fields():
+    """Test that all optional fields are passed correctly to the prompt."""
+    fake_client = FakeStructuredLLMClient()
+    agent = IntakeEnrichmentAgent(client=fake_client)
+
+    raw_input = RawInput(
+        inn_raw="метформин",
+        disease_raw="сахарный диабет 2 типа",
+        region="RU",
+        molecule_type="small_molecule",
+        stage="Phase III",
+    )
+
+    agent.run(raw_input, run_id="run_004")
+
+    call = fake_client.calls[0]
+    user_prompt = call["user_prompt"]
+    assert "метформин" in user_prompt
+    assert "сахарный диабет 2 типа" in user_prompt
+    assert "RU" in user_prompt
+    assert "small_molecule" in user_prompt
+    assert "Phase III" in user_prompt

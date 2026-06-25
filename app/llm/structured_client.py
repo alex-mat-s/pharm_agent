@@ -157,6 +157,13 @@ class StructuredLLMClient:
                 run_id=run_id,
             )
         except OpenRouterError as exc:
+            exc_str = str(exc)
+            # Detect network-level errors for user-friendly messaging
+            is_network = any(kw in exc_str for kw in (
+                "RemoteProtocolError", "ReadError", "ConnectError",
+                "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+                "network error", "peer closed",
+            ))
             log_event(
                 AuditEvent(
                     event_id=f"llm_network_error_attempt_{attempt}",
@@ -168,10 +175,19 @@ class StructuredLLMClient:
                     metadata={
                         "attempt": attempt,
                         "error": type(exc).__name__,
-                        "error_message": str(exc),
+                        "error_message": exc_str[:500],
+                        "is_network_error": is_network,
                     },
                 )
             )
+            if is_network:
+                raise StructuredOutputError(
+                    f"Сетевая ошибка при обращении к LLM (попытка {attempt}): "
+                    f"сервер разорвал соединение. Это может быть вызвано большим "
+                    f"объёмом ответа или нестабильной сетью. "
+                    f"Попробуйте запустить анализ повторно. "
+                    f"Детали: {exc_str[:200]}"
+                ) from exc
             raise StructuredOutputError(
                 f"OpenRouter call failed on attempt {attempt}: {exc}"
             ) from exc

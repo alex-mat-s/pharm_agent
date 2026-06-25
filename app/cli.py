@@ -313,6 +313,102 @@ def status(run_id: str = typer.Option(..., help="Run ID to query")) -> None:
 
 
 @app.command()
+def synthesize(
+    run_id: str = typer.Option(..., help="Run ID to synthesize"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+) -> None:
+    """Run the final synthesis stage for an existing run.
+    
+    This command executes only the synthesis stage, which integrates outputs
+    from the scientific, market, and patent/finance agents into a single
+    final assessment report.
+    
+    Requirements:
+    - Run must exist
+    - Human verification must be approved
+    - Scientific agent output must exist
+    - Market agent output must exist
+    - Patent/finance agent output must exist
+    """
+    _setup_debug(debug)
+    config.ensure_dirs()
+    db = Database()
+    db.init_schema()
+    
+    # Check run exists
+    run = db.get_run(run_id)
+    if run is None:
+        typer.echo(f"Error: Run {run_id} not found", err=True)
+        raise typer.Exit(code=1)
+    
+    _print_section("SYNTHESIS / ФИНАЛЬНЫЙ СИНТЕЗ")
+    typer.echo(f"  Run ID: {run_id}")
+    typer.echo(f"  Current status: {run.status.value}")
+    
+    # Import here to avoid circular imports
+    from app.agents.synthesis_agent import SynthesisAgent
+    from app.schemas.synthesis import SynthesisPreconditionError
+    from app.llm.structured_client import StructuredOutputError
+    
+    agent = SynthesisAgent(db=db)
+    
+    try:
+        typer.echo("\n  Running synthesis agent...")
+        output = agent.run(run_id)
+        
+        _print_section("SYNTHESIS COMPLETED / СИНТЕЗ ЗАВЕРШЁН")
+        typer.echo(f"\n  Run ID: {run_id}")
+        typer.echo(f"  Go/No-Go: {output.overall_conclusion.go_no_go_interpretation.upper()}")
+        typer.echo(f"  Main reason: {output.overall_conclusion.main_reason[:80]}...")
+        
+        if output.contradictions:
+            typer.echo(f"\n  ⚠ Contradictions found: {len(output.contradictions)}")
+            for c in output.contradictions[:3]:
+                typer.echo(f"    - [{c.severity}] {c.area}: {c.description[:50]}...")
+        
+        if output.manual_review_required:
+            typer.echo(f"\n  ℹ Manual review items: {len(output.manual_review_required)}")
+            for item in output.manual_review_required[:3]:
+                typer.echo(f"    - [{item.priority}] {item.area}: {item.reason[:50]}...")
+        
+        # Get report path from db
+        run_updated = db.get_run(run_id)
+        if run_updated and run_updated.final_summary_json:
+            import json as _json
+            try:
+                summary = _json.loads(run_updated.final_summary_json)
+                report_path = summary.get("report_path", "")
+                if report_path:
+                    typer.echo(f"\n  Final report: {report_path}")
+            except Exception:
+                pass
+        
+        typer.echo(f"\n{DISCLAIMER}")
+        
+    except SynthesisPreconditionError as exc:
+        typer.echo(f"\n  ❌ Precondition failed: {exc}", err=True)
+        typer.echo("\n  Required preconditions for synthesis:")
+        typer.echo("    - Human verification must be approved")
+        typer.echo("    - Scientific agent must be completed")
+        typer.echo("    - Market agent must be completed")
+        typer.echo("    - Patent/finance agent must be completed")
+        typer.echo(f"\n{DISCLAIMER}")
+        raise typer.Exit(code=1)
+        
+    except StructuredOutputError as exc:
+        typer.echo(f"\n  ❌ LLM output validation failed: {exc}", err=True)
+        typer.echo("  The synthesis agent could not produce valid structured output.")
+        typer.echo("  Check audit logs for details.")
+        typer.echo(f"\n{DISCLAIMER}")
+        raise typer.Exit(code=1)
+        
+    except Exception as exc:
+        typer.echo(f"\n  ❌ Synthesis failed: {exc}", err=True)
+        typer.echo(f"\n{DISCLAIMER}")
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def revise(
     run_id: str = typer.Option(..., help="Run ID in needs_revision status"),
     inn: str = typer.Option(..., help="Corrected МНН / INN"),

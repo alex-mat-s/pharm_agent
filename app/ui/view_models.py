@@ -18,24 +18,24 @@ class IntakeFormData:
     pdf_paths: list[Path]
 
     def validation_summary(self) -> str:
-        """Human-readable pre-submit summary in Russian."""
+        """Human-readable pre-submit summary."""
         lines = [
-            "── Проверка перед запуском ──",
-            f"  МНН / INN: {self.inn_raw}",
+            "── Pre-submit Validation ──",
+            f"  INN: {self.inn_raw}",
         ]
         if self.disease_raw:
-            lines.append(f"  Заболевание: {self.disease_raw}")
+            lines.append(f"  Disease: {self.disease_raw}")
         if self.region:
-            lines.append(f"  Регион: {self.region}")
+            lines.append(f"  Region: {self.region}")
         if self.molecule_type:
-            lines.append(f"  Тип молекулы: {self.molecule_type}")
+            lines.append(f"  Molecule type: {self.molecule_type}")
         if self.stage:
-            lines.append(f"  Стадия: {self.stage}")
-        lines.append(f"  PDF файлы ({len(self.pdf_paths)}):")
+            lines.append(f"  Stage: {self.stage}")
+        lines.append(f"  PDF files ({len(self.pdf_paths)}):")
         for p in self.pdf_paths:
             lines.append(f"    • {p.name}")
         lines.append("")
-        lines.append("⏭ После отправки система проведёт обогащение и потребует вашу верификацию.")
+        lines.append("⏭ After submission, the system will run enrichment and require your verification.")
         return "\n".join(lines)
 
 
@@ -60,24 +60,24 @@ def validate_intake_form(
 
     inn_clean = (inn or "").strip()
     if not inn_clean:
-        errors.append(IntakeValidationError("inn", "МНН / INN — обязательное поле."))
+        errors.append(IntakeValidationError("inn", "INN is a required field."))
 
     pdf_paths: list[Path] = []
     if not pdf_files or len(pdf_files) < 2:
         errors.append(IntakeValidationError(
             "pdf",
-            f"Необходимо загрузить ровно 2 PDF файла (загружено: {len(pdf_files) if pdf_files else 0}).",
+            f"You must upload exactly 2 PDF files (uploaded: {len(pdf_files) if pdf_files else 0}).",
         ))
     elif len(pdf_files) > 2:
         errors.append(IntakeValidationError(
             "pdf",
-            f"Загрузите ровно 2 PDF файла, не больше (загружено: {len(pdf_files)}).",
+            f"Upload exactly 2 PDF files, no more (uploaded: {len(pdf_files)}).",
         ))
     else:
         for f in pdf_files:
             p = Path(f) if isinstance(f, str) else Path(f.name) if hasattr(f, "name") else None
             if p is None or not p.exists():
-                errors.append(IntakeValidationError("pdf", f"PDF файл не найден: {f}"))
+                errors.append(IntakeValidationError("pdf", f"PDF file not found: {f}"))
             else:
                 pdf_paths.append(p.resolve())
 
@@ -89,7 +89,7 @@ def validate_intake_form(
     if stage_clean and stage_clean not in valid_stages:
         errors.append(IntakeValidationError(
             "stage",
-            f"Стадия должна быть одной из: {', '.join(sorted(valid_stages))}.",
+            f"Stage must be one of: {', '.join(sorted(valid_stages))}.",
         ))
 
     if errors:
@@ -133,17 +133,17 @@ def format_verification_packet(packet) -> str:  # noqa: ANN001
     lines: list[str] = []
 
     lines.append(f"**Run ID:** `{packet.run_id}`")
-    lines.append(f"**Полнота данных (completeness):** `{packet.completeness}`")
+    lines.append(f"**Data completeness:** `{packet.completeness}`")
 
     if packet.completeness == "low":
-        lines.append("\n> ⚠️ **ВНИМАНИЕ:** Полнота данных LOW — критическая информация отсутствует. "
-                     "Рекомендуется отправить на доработку.\n")
+        lines.append("\n> ⚠️ **WARNING:** Data completeness is LOW — critical information is missing. "
+                     "Consider sending for revision.\n")
 
-    lines.append("\n---\n### Исходные данные (raw)")
-    lines.append(f"- **МНН / INN:** {packet.raw_inn}")
-    lines.append(f"- **Заболевание:** {packet.raw_disease or '— не указано —'}")
+    lines.append("\n---\n### Raw Input Data")
+    lines.append(f"- **INN:** {packet.raw_inn}")
+    lines.append(f"- **Disease:** {packet.raw_disease or '— not specified —'}")
 
-    lines.append("\n### Нормализованный МНН")
+    lines.append("\n### Normalized INN")
     inn = packet.normalized_inn
     inn_data = inn if isinstance(inn, dict) else inn.__dict__ if hasattr(inn, "__dict__") else {}
     if hasattr(inn, "preferred_name"):
@@ -162,20 +162,20 @@ def format_verification_packet(packet) -> str:  # noqa: ANN001
         if inn_data.get("english_inn"):
             lines.append(f"- **English INN:** {inn_data['english_inn']}")
         if inn_data.get("russian_name"):
-            lines.append(f"- **Russian name (МНН):** {inn_data['russian_name']}")
+            lines.append(f"- **Russian name:** {inn_data['russian_name']}")
         if inn_data.get("synonyms"):
-            lines.append(f"- **Синонимы:** {', '.join(inn_data['synonyms'])}")
+            lines.append(f"- **Synonyms:** {', '.join(inn_data['synonyms'])}")
         if inn_data.get("brand_names"):
-            lines.append(f"- **Бренды:** {', '.join(inn_data['brand_names'])}")
+            lines.append(f"- **Brands:** {', '.join(inn_data['brand_names'])}")
         if inn_data.get("molecule_type"):
-            lines.append(f"- **Тип молекулы:** {inn_data['molecule_type']}")
+            lines.append(f"- **Molecule type:** {inn_data['molecule_type']}")
         if inn_data.get("confidence"):
-            lines.append(f"- **Уверенность:** {inn_data['confidence']}")
+            lines.append(f"- **Confidence:** {inn_data['confidence']}")
     else:
         lines.append(f"  {inn}")
 
     if packet.normalized_disease:
-        lines.append("\n### Нормализованное заболевание")
+        lines.append("\n### Normalized Disease")
         dis = packet.normalized_disease
         dis_data = dis if isinstance(dis, dict) else {}
         if hasattr(dis, "preferred_name"):
@@ -189,36 +189,36 @@ def format_verification_packet(packet) -> str:  # noqa: ANN001
         if dis_data.get("preferred_name"):
             lines.append(f"- **Preferred name:** {dis_data['preferred_name']}")
             if dis_data.get("synonyms"):
-                lines.append(f"- **Синонимы:** {', '.join(dis_data['synonyms'])}")
+                lines.append(f"- **Synonyms:** {', '.join(dis_data['synonyms'])}")
             if dis_data.get("subtypes"):
-                lines.append(f"- **Подтипы:** {', '.join(dis_data['subtypes'])}")
+                lines.append(f"- **Subtypes:** {', '.join(dis_data['subtypes'])}")
             if dis_data.get("confidence"):
-                lines.append(f"- **Уверенность:** {dis_data['confidence']}")
+                lines.append(f"- **Confidence:** {dis_data['confidence']}")
         else:
             lines.append(f"  {dis}")
 
     if packet.ambiguities:
-        lines.append("\n### Неоднозначности")
+        lines.append("\n### Ambiguities")
         for a in packet.ambiguities:
             lines.append(f"- {a}")
 
     if packet.assumptions:
-        lines.append("\n### Допущения")
+        lines.append("\n### Assumptions")
         for a in packet.assumptions:
             lines.append(f"- {a}")
 
     if packet.missing_information:
-        lines.append("\n### Недостающая информация")
+        lines.append("\n### Missing Information")
         for m in packet.missing_information:
             lines.append(f"- {m}")
 
     if packet.questions:
-        lines.append("\n### Вопросы для рецензента")
+        lines.append("\n### Questions for Reviewer")
         for q in packet.questions:
             lines.append(f"- ❓ {q}")
 
     if packet.pdf_extraction_status:
-        lines.append("\n### Статус PDF")
+        lines.append("\n### PDF Status")
         for pid, st in packet.pdf_extraction_status.items():
             lines.append(f"- `{pid}`: {st}")
 

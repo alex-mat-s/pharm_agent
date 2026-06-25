@@ -50,6 +50,35 @@ def mask_secrets(text: str) -> str:
     return _SECRET_PATTERN.sub("[REDACTED]", text)
 
 
+_NETWORK_KEYWORDS = (
+    "RemoteProtocolError", "ReadError", "ConnectError",
+    "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+    "network error", "peer closed", "incomplete chunked",
+    "Сетевая ошибка", "сервер разорвал",
+)
+
+
+def _is_network_error(text: str) -> bool:
+    """Check if an error message indicates a network-level failure."""
+    return any(kw in text for kw in _NETWORK_KEYWORDS)
+
+
+def _format_user_error(exc: Exception) -> str:
+    """Format an exception into a user-friendly error message (Russian)."""
+    exc_str = str(exc)
+    if _is_network_error(exc_str):
+        return (
+            "⚠️ Ошибка сети при обращении к LLM-серверу. "
+            "Сервер разорвал соединение до завершения ответа. "
+            "Это может быть вызвано большим объёмом генерируемого текста "
+            "или временной нестабильностью сети. "
+            "Попробуйте повторить запуск через несколько минут."
+        )
+    # Mask secrets before exposing to UI
+    safe_msg = mask_secrets(exc_str)
+    return f"Ошибка: {type(exc).__name__}: {safe_msg[:300]}"
+
+
 # ─── Data classes for UI responses ───────────────────────────────────────────
 
 @dataclass
@@ -96,10 +125,10 @@ def create_run_and_enrich(
 
     inn = (inn or "").strip()
     if not inn:
-        return RunCreateResult(success=False, error="МНН / INN обязателен.")
+        return RunCreateResult(success=False, error="INN is required.")
 
     if not pdf1_path or not pdf2_path:
-        return RunCreateResult(success=False, error="Необходимо загрузить ровно 2 PDF файла.")
+        return RunCreateResult(success=False, error="You must upload exactly 2 PDF files.")
 
     pdf1 = Path(pdf1_path)
     pdf2 = Path(pdf2_path)
@@ -111,7 +140,7 @@ def create_run_and_enrich(
     pdf_paths: list[Path] = []
     for src in (pdf1, pdf2):
         if not src.exists():
-            return RunCreateResult(success=False, error=f"PDF файл не найден: {src.name}")
+            return RunCreateResult(success=False, error=f"PDF file not found: {src.name}")
         dst = target_dir / src.name
         if dst != src:
             shutil.copy2(str(src), str(dst))
@@ -138,7 +167,7 @@ def create_run_and_enrich(
             success=False,
             run_id=record.run_id,
             status=record.status.value,
-            error=record.error_message or "Неизвестная ошибка при обогащении.",
+            error=record.error_message or "Unknown error during enrichment.",
         )
 
     enrichment_json = record.enrichment_output_json or "{}"
@@ -158,55 +187,55 @@ def _build_enrichment_summary(enrichment_json: str, packet: HumanVerificationPac
     try:
         data = json.loads(enrichment_json)
     except json.JSONDecodeError:
-        return "Ошибка разбора enrichment JSON."
+        return "Error parsing enrichment JSON."
 
-    lines: list[str] = ["## Результат обогащения\n"]
+    lines: list[str] = ["## Enrichment Result\n"]
     inn = data.get("normalized_inn", {})
     if inn:
         lines.append(f"**INN (preferred):** {inn.get('preferred_name', '?')}")
         if inn.get("english_inn"):
             lines.append(f"**English INN:** {inn['english_inn']}")
         if inn.get("russian_name"):
-            lines.append(f"**МНН (русский):** {inn['russian_name']}")
+            lines.append(f"**Russian INN:** {inn['russian_name']}")
         if inn.get("synonyms"):
-            lines.append(f"**Синонимы:** {', '.join(inn['synonyms'])}")
+            lines.append(f"**Synonyms:** {', '.join(inn['synonyms'])}")
         if inn.get("brand_names"):
-            lines.append(f"**Бренды:** {', '.join(inn['brand_names'])}")
-        lines.append(f"**Тип молекулы:** {inn.get('molecule_type', '?')}")
-        lines.append(f"**Уверенность:** {inn.get('confidence', '?')}")
+            lines.append(f"**Brands:** {', '.join(inn['brand_names'])}")
+        lines.append(f"**Molecule type:** {inn.get('molecule_type', '?')}")
+        lines.append(f"**Confidence:** {inn.get('confidence', '?')}")
 
     dis = data.get("normalized_disease")
     if dis:
-        lines.append(f"\n**Заболевание:** {dis.get('preferred_name', '?')}")
+        lines.append(f"\n**Disease:** {dis.get('preferred_name', '?')}")
         if dis.get("synonyms"):
-            lines.append(f"**Синонимы:** {', '.join(dis['synonyms'])}")
+            lines.append(f"**Synonyms:** {', '.join(dis['synonyms'])}")
         if dis.get("subtypes"):
-            lines.append(f"**Подтипы:** {', '.join(dis['subtypes'])}")
+            lines.append(f"**Subtypes:** {', '.join(dis['subtypes'])}")
 
     if data.get("ambiguities"):
-        lines.append("\n**Неоднозначности:**")
+        lines.append("\n**Ambiguities:**")
         for a in data["ambiguities"]:
             lines.append(f"- {a}")
 
     if data.get("assumptions"):
-        lines.append("\n**Допущения:**")
+        lines.append("\n**Assumptions:**")
         for a in data["assumptions"]:
             lines.append(f"- {a}")
 
     if data.get("missing_information"):
-        lines.append("\n**Недостающая информация:**")
+        lines.append("\n**Missing information:**")
         for m in data["missing_information"]:
             lines.append(f"- {m}")
 
     if data.get("human_questions"):
-        lines.append("\n**Вопросы рецензенту:**")
+        lines.append("\n**Questions for reviewer:**")
         for q in data["human_questions"]:
             lines.append(f"- ❓ {q}")
 
     completeness = data.get("completeness", "medium")
-    lines.append(f"\n**Полнота:** `{completeness}`")
+    lines.append(f"\n**Completeness:** `{completeness}`")
     if completeness == "low":
-        lines.append("\n> ⚠️ Полнота LOW — критическая информация отсутствует.")
+        lines.append("\n> ⚠️ Completeness LOW — critical information is missing.")
 
     return "\n".join(lines)
 
@@ -248,7 +277,7 @@ def submit_decision(
     logger.info("submit_decision: run_id=%s, decision=%s", run_id, decision)
 
     if decision not in ("approved", "approved_with_edits", "rejected", "needs_revision"):
-        return DecisionResult(success=False, error="Неверное решение.")
+        return DecisionResult(success=False, error="Invalid decision.")
 
     # Map UI values to backend schema
     backend_decision = "approved" if decision == "approved_with_edits" else decision
@@ -270,14 +299,25 @@ def submit_decision(
         return DecisionResult(success=False, error=str(exc))
     except Exception as exc:
         logger.exception("submit_decision failed")
-        return DecisionResult(success=False, error=f"{type(exc).__name__}: {exc}")
+        error_msg = _format_user_error(exc)
+        return DecisionResult(success=False, error=error_msg)
 
-    next_action = {
-        RunStatus.completed: "Run завершён.",
-        RunStatus.needs_revision: "Отправлено на доработку. Создайте новый run с исправленными данными.",
-        RunStatus.human_approved: "Верификация принята. Можно запускать Scientific Agent.",
-        RunStatus.failed: "Ошибка. Проверьте логи.",
-    }.get(record.status, f"Статус: {record.status.value}")
+    # Build user-friendly next action message
+    if record.status == RunStatus.failed:
+        error_detail = record.error_message or "Unknown error"
+        if _is_network_error(error_detail):
+            next_action = (
+                "⚠️ Ошибка сети при обращении к LLM. "
+                "Попробуйте повторить запуск через несколько минут."
+            )
+        else:
+            next_action = f"❌ Ошибка при выполнении анализа: {error_detail[:150]}"
+    else:
+        next_action = {
+            RunStatus.completed: "✅ Все этапы анализа завершены успешно.",
+            RunStatus.needs_revision: "Sent for revision. Create a new run with corrected data.",
+            RunStatus.human_approved: "Verification accepted. You can now run Scientific Agent.",
+        }.get(record.status, f"Status: {record.status.value}")
 
     return DecisionResult(
         success=True,
@@ -312,7 +352,7 @@ def get_run_status(run_id: str) -> dict:
     db = _db()
     run = db.get_run(run_id)
     if run is None:
-        return {"error": f"Run {run_id} не найден."}
+        return {"error": f"Run {run_id} not found."}
 
     steps = db.get_run_steps(run_id)
     step_map = {s["step_name"]: s for s in steps}
@@ -352,20 +392,20 @@ def run_scientific_agent(run_id: str) -> str:
     db = _db()
     run = db.get_run(run_id)
     if run is None:
-        return "❌ Run не найден."
+        return "❌ Run not found."
 
     if run.status not in (RunStatus.human_approved, RunStatus.completed):
         if run.status == RunStatus.awaiting_human_verification:
-            return "❌ Сначала пройдите верификацию (Tab 2). Scientific Agent не может запуститься без одобрения."
+            return "❌ Complete verification first (Tab 2). Scientific Agent cannot run without approval."
         if run.status in (RunStatus.human_rejected,):
-            return "❌ Run отклонён. Scientific Agent не может быть запущен."
-        return f"❌ Невозможно запустить Scientific Agent в статусе: {run.status.value}"
+            return "❌ Run rejected. Scientific Agent cannot run."
+        return f"❌ Cannot run Scientific Agent in status: {run.status.value}"
 
     if run.status == RunStatus.completed:
         # Check if scientific output already exists
         existing = db.get_scientific_output(run_id)
         if existing:
-            return "ℹ️ Scientific Agent уже был выполнен для этого run."
+            return "ℹ️ Scientific Agent has already run for this run."
 
     # Re-run finalize to trigger scientific stage (it's idempotent for already-approved runs)
     orchestrator = _orchestrator(db)
@@ -376,10 +416,10 @@ def run_scientific_agent(run_id: str) -> str:
     try:
         orchestrator._run_scientific_stage(run_id, enrichment, pdf_hashes)
         db.update_run_status(run_id, RunStatus.completed)
-        return "✅ Scientific Agent завершён успешно."
+        return "✅ Scientific Agent completed successfully."
     except Exception as exc:
         logger.exception("Scientific agent failed")
-        return f"❌ Ошибка Scientific Agent: {type(exc).__name__}: {exc}"
+        return f"❌ Scientific Agent error: {type(exc).__name__}: {exc}"
 
 
 # ─── Tab 4: Evidence Explorer ─────────────────────────────────────────────────
@@ -427,7 +467,7 @@ def load_scientific_memo(run_id: str) -> tuple[str, str]:
 
     if not memo_text:
         # Fallback: check if there's a memo in the run
-        memo_text = "Научное memo ещё не сгенерировано для этого run."
+        memo_text = "Scientific memo has not been generated for this run yet."
 
     output_json = db.get_scientific_output(run_id) or "{}"
     return memo_text, output_json
@@ -451,7 +491,7 @@ def load_market_memo(run_id: str) -> tuple[str, str]:
                 break
 
     if not memo_text:
-        memo_text = "Market memo ещё не сгенерировано для этого run."
+        memo_text = "Market memo has not been generated for this run yet."
 
     output_json = db.get_market_output(run_id) or "{}"
     return memo_text, output_json
@@ -475,29 +515,152 @@ def get_audit_events(run_id: str, count: int = 50, event_filter: str = "all") ->
     return mask_secrets(raw)
 
 
-# ─── Tab 7: Healthcheck ──────────────────────────────────────────────────────
+# ─── Tab 9: Healthcheck ──────────────────────────────────────────────────────
 
 def run_healthcheck() -> str:
     """Run all healthchecks and return formatted results."""
     from app.services.healthcheck import run_all_checks
 
     results = run_all_checks()
-    lines = ["| Компонент | Статус | Детали |", "|---|---|---|"]
+    lines = ["| Component | Status | Details |", "|---|---|---|"]
     for r in results:
         icon = "✅" if r.ok else ("🔴" if r.fatal else "⚠️")
         lines.append(f"| {r.name} | {icon} | {r.detail} |")
 
     fatals = [r for r in results if not r.ok and r.fatal]
     if fatals:
-        lines.append(f"\n**🔴 Критические проблемы ({len(fatals)}):** "
+        lines.append(f"\n**🔴 Critical issues ({len(fatals)}):** "
                      + ", ".join(r.name for r in fatals))
 
     warnings = [r for r in results if not r.ok and not r.fatal]
     if warnings:
-        lines.append(f"\n**⚠️ Предупреждения ({len(warnings)}):** "
+        lines.append(f"\n**⚠️ Warnings ({len(warnings)}):** "
                      + ", ".join(r.name for r in warnings))
 
     if not fatals and not warnings:
-        lines.append("\n**Все компоненты в норме.**")
+        lines.append("\n**All components are healthy.**")
 
     return "\n".join(lines)
+
+
+# ─── Tab 7: Final Synthesis ──────────────────────────────────────────────────
+
+def run_synthesis_agent(run_id: str) -> dict:
+    """Run the final synthesis agent for a given run_id."""
+    logger.info("run_synthesis_agent: run_id=%r", run_id)
+    
+    run_id = (run_id or "").strip()
+    if not run_id:
+        return {"success": False, "error": "Run ID is required."}
+    
+    db = _db()
+    
+    try:
+        from app.agents.synthesis_agent import SynthesisAgent
+        from app.schemas.synthesis import SynthesisPreconditionError
+        from app.llm.structured_client import StructuredOutputError
+        
+        agent = SynthesisAgent(db=db)
+        output = agent.run(run_id)
+        
+        # Read full report from vault
+        report_preview = ""
+        report_dir = config.vault_dir / "04_reports" / "final"
+        if report_dir.exists():
+            for f in sorted(report_dir.glob(f"*{run_id}*"), reverse=True):
+                if f.suffix == ".md":
+                    content = f.read_text(encoding="utf-8")
+                    report_preview = content
+                    break
+        
+        # Format contradictions for UI
+        contradictions = []
+        for c in output.contradictions:
+            contradictions.append({
+                "area": c.area,
+                "description": c.description,
+                "severity": c.severity,
+                "affected_conclusion": c.affected_conclusion,
+            })
+        
+        # Format manual review items for UI
+        manual_review_items = []
+        for item in output.manual_review_required:
+            manual_review_items.append({
+                "area": item.area,
+                "reason": item.reason,
+                "recommended_expert_type": item.recommended_expert_type,
+                "priority": item.priority,
+            })
+        
+        return {
+            "success": True,
+            "run_id": run_id,
+            "go_no_go": output.overall_conclusion.go_no_go_interpretation,
+            "main_reason": output.overall_conclusion.main_reason,
+            "summary": output.overall_conclusion.summary,
+            "contradictions_count": len(output.contradictions),
+            "manual_review_count": len(output.manual_review_required),
+            "contradictions": contradictions,
+            "manual_review_items": manual_review_items,
+            "report_preview": report_preview,
+            "output_json": output.model_dump(mode="json"),
+        }
+        
+    except SynthesisPreconditionError as e:
+        logger.warning("Synthesis precondition failed: %s", e)
+        return {"success": False, "error": f"Preconditions not met: {e}"}
+        
+    except StructuredOutputError as e:
+        logger.error("Synthesis LLM output validation failed: %s", e)
+        return {"success": False, "error": f"LLM validation error: {e}"}
+        
+    except Exception as e:
+        logger.exception("Synthesis agent error")
+        return {"success": False, "error": f"Synthesis error: {e}"}
+
+
+def load_synthesis_report(run_id: str) -> dict:
+    """Load existing synthesis report for a given run_id."""
+    logger.info("load_synthesis_report: run_id=%r", run_id)
+    
+    run_id = (run_id or "").strip()
+    if not run_id:
+        return {"success": False, "error": "Run ID is required."}
+    
+    db = _db()
+    
+    # Try to load from database
+    output_json = db.get_synthesis_output(run_id)
+    if not output_json:
+        return {"success": False, "error": "Synthesis report not found for this run."}
+    
+    try:
+        output_data = json.loads(output_json)
+    except json.JSONDecodeError:
+        return {"success": False, "error": "Unable to parse report JSON."}
+    
+    # Try to load markdown report
+    report_content = ""
+    report_dir = config.vault_dir / "04_reports" / "final"
+    if report_dir.exists():
+        for f in sorted(report_dir.glob(f"*{run_id}*"), reverse=True):
+            if f.suffix == ".md":
+                report_content = f.read_text(encoding="utf-8")
+                break
+    
+    if not report_content:
+        report_content = "*Markdown report not found.*"
+    
+    # Extract key fields
+    overall = output_data.get("overall_conclusion", {})
+    
+    return {
+        "success": True,
+        "run_id": run_id,
+        "go_no_go": overall.get("go_no_go_interpretation", "?"),
+        "main_reason": overall.get("main_reason", "N/A"),
+        "summary": overall.get("summary", ""),
+        "report_content": report_content,
+        "output_json": output_data,
+    }
